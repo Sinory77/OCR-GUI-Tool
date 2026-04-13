@@ -86,22 +86,110 @@ python run_fluent.py
 
 ```
 OCR-GUI-Tool/
-├── core/                      # 核心模块
-│   ├── config.py             # 配置管理
-│   ├── ocr_engine.py         # OCR 引擎封装
-│   ├── screenshot.py         # 截图功能
-│   └── history.py            # 历史记录
-├── interfaces/               # 界面实现
-│   ├── fluent/              # Fluent Design 界面
-│   ├── pyside6_dracula/    # PySide6 Dracula 风格
-│   ├── pyqt6_ui/           # PyQt6 界面
-│   └── tkinter_ui.py       # Tkinter 简洁界面
-├── PaddleOCR-json/          # OCR 引擎（自带）
-├── config.json              # 用户配置
-├── history.json             # 识别历史
-├── requirements.txt        # Python 依赖
-└── run_fluent.py           # 启动脚本
+├── core/                              # 核心业务逻辑
+│   ├── __init__.py                    # 模块初始化
+│   ├── config.py                      # 配置管理（读写 config.json）
+│   ├── ocr_engine.py                  # OCR 引擎封装（启动进程、发送图片、解析结果）
+│   ├── screenshot.py                  # 全局截图功能（调用 Win32 API）
+│   ├── hotkey.py                      # 全局快捷键注册
+│   ├── history.py                     # 历史记录管理（增删改查）
+│   └── api/                           # API 接口
+│       └── __init__.py
+│
+├── interfaces/                        # 界面层（所有 UI 实现）
+│   │
+│   ├── fluent/                        # ⭐ Fluent Design 界面（推荐）
+│   │   ├── __init__.py
+│   │   ├── main_window.py             # 主窗口（NavigationInterface + StackedWidget）
+│   │   ├── resource.py                # 资源文件
+│   │   └── pages/                     # 页面组件
+│   │       ├── __init__.py
+│   │       ├── ocr_page.py            # OCR 识别页面（截图、拖拽、批量识别）
+│   │       ├── history_page.py        # 历史记录页面
+│   │       └── settings_page.py       # 设置页面（引擎路径、语言、快捷键等）
+│   │
+│   ├── pyside6_dracula/              # PySide6 Dracula 风格界面
+│   │   ├── main.py
+│   │   ├── modules/
+│   │   └── widgets/
+│   │
+│   ├── pyqt6_ui/                     # PyQt6 界面
+│   │   ├── PyDracula/
+│   │   │   ├── main.py
+│   │   │   └── modules/
+│   │   └── ...
+│   │
+│   ├── web_ui/                       # Web 界面（pywebview）
+│   │   ├── web_ui.py
+│   │   └── web/
+│   │       ├── index.html
+│   │       ├── styles.css
+│   │       └── app.js
+│   │
+│   └── tkinter_ui.py                 # Tkinter 简洁界面
+│
+├── PaddleOCR-json/                    # OCR 引擎（独立可执行文件）
+│   ├── PaddleOCR-json.exe             # 主程序
+│   ├── *.dll                          # 依赖的动态链接库
+│   └── models/                        # OCR 模型文件
+│       ├── config_chinese.txt         # 中文识别配置
+│       ├── config_chinese_cht.txt     # 繁体识别配置
+│       ├── config_en.txt             # 英文识别配置
+│       ├── config_japan.txt           # 日文识别配置
+│       ├── config_korean.txt          # 韩文识别配置
+│       ├── config_cyrillic.txt        # 俄文识别配置
+│       └── ch_PP-OCRv3_det_infer/    # 检测模型
+│       └── ch_PP-OCRv3_rec_infer/    # 识别模型
+│       └── ...
+│
+├── api/                               # 预留 API 模块
+│   └── __init__.py
+│
+├── config.json                        # 用户配置文件（运行时生成）
+├── history.json                       # 识别历史记录（运行时生成）
+├── requirements.txt                   # Python 依赖列表
+├── README.md                          # 项目说明文档
+├── .gitignore                         # Git 忽略规则
+├── main.py                            # 统一入口（支持选择界面类型）
+├── run_fluent.py                      # 启动 Fluent 界面
+├── run_pyqt6.py                       # 启动 PyQt6 界面
+└── run_pyside6_dracula.py             # 启动 Dracula 界面
 ```
+
+## 目录说明
+
+### `core/` - 核心模块
+| 文件 | 说明 |
+|------|------|
+| `config.py` | 配置文件读写，持久化用户设置 |
+| `ocr_engine.py` | 封装 PaddleOCR-json 进程管理、通讯协议、状态码处理 |
+| `screenshot.py` | 调用 Windows API 实现全局截图 |
+| `hotkey.py` | 注册/注销全局快捷键 |
+| `history.py` | 历史记录 CRUD 操作，支持存储/显示上限 |
+
+### `interfaces/` - 界面实现
+| 目录 | 说明 |
+|------|------|
+| `fluent/` | **推荐** - PySide6 + qfluentwidgets，Fluent Design 风格 |
+| `pyside6_dracula/` | PySide6 + Dracula 暗色主题 |
+| `pyqt6_ui/` | PyQt6 + PyDracula 主题 |
+| `web_ui/` | 浏览器内嵌 Web 界面（pywebview） |
+| `tkinter_ui.py` | Tkinter 原生界面，零依赖 |
+
+### `PaddleOCR-json/` - OCR 引擎
+| 文件/目录 | 说明 |
+|------|------|
+| `PaddleOCR-json.exe` | OCR 主程序（独立进程运行） |
+| `*.dll` | 依赖库（OpenCV、MKL 等） |
+| `models/config_*.txt` | 各种语言的识别配置 |
+| `models/*_infer/` | 预训练模型（检测+识别+方向分类） |
+
+### 根目录配置文件
+| 文件 | 说明 |
+|------|------|
+| `config.json` | 用户配置（exe 路径、语言、快捷键等） |
+| `history.json` | 识别历史记录 |
+| `requirements.txt` | Python 依赖（pip install -r requirements.txt） |
 
 ## 配置说明
 

@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PaddleOCR 识别工具</title>
+    <link rel="stylesheet" href="styles.css?v=9">
+    <script src="app.js?v=7"></script>
+</head>
+<body>
+    <!-- Loading 封面 -->
+    <div id="loadingScreen" class="loading-screen">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">正在初始化<span class="loading-dots"></span></div>
+    </div>
+
+    <div class="app-container" onmousedown="app.preventDragOnInteractiveElements">
+        <!-- 自定义标题栏 -->
+        <header class="titlebar" id="titlebar">
+            <div class="titlebar-drag" onmousedown="app.startTitlebarDrag(event)">
+                <span class="titlebar-icon">📖</span>
+                <span class="titlebar-title">PaddleOCR 识别工具</span>
+            </div>
+            <div class="titlebar-controls">
+                <select id="languageSelect" class="titlebar-select">
+                    <option value="简体中文">简体中文</option>
+                    <option value="繁体中文">繁体中文</option>
+                    <option value="English">English</option>
+                    <option value="日本語">日本語</option>
+                    <option value="한국어">한국어</option>
+                </select>
+                <button id="settingsBtn" class="titlebar-btn" title="设置">⚙️</button>
+                <button id="minimizeBtn" class="titlebar-btn" title="最小化" onclick="minimizeWindow()">─</button>
+                <button id="maximizeBtn" class="titlebar-btn" title="最大化" onclick="toggleMaximize()">☐</button>
+                <button id="closeBtn" class="titlebar-btn titlebar-btn-close" title="关闭" onclick="closeWindow()">×</button>
+            </div>
+        </header>
+
+        <!-- 主内容区 -->
+        <main class="main-content">
+            <!-- 左侧：图片预览 -->
+            <section class="image-section">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>图片预览</h2>
+                        <div class="card-actions">
+                            <button id="openImageBtn" class="btn btn-sm">📂 打开</button>
+                            <button id="screenshotBtn" class="btn btn-sm">🖼️ 截图</button>
+                            <button id="batchBtn" class="btn btn-sm">📁 批量</button>
+                        </div>
+                    </div>
+                    <div id="dropZone" class="drop-zone">
+                        <div id="imagePreview" class="image-preview">
+                            <div class="placeholder">
+                                <span class="icon">🖼️</span>
+                                <p>拖拽图片到这里</p>
+                                <p class="hint">或点击上方按钮打开</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="imageInfo" class="image-info">
+                        <span>未加载图片</span>
+                    </div>
+                    <button id="recognizeBtn" class="btn btn-primary btn-block" disabled>
+                        🔍 开始识别
+                    </button>
+                </div>
+            </section>
+
+            <!-- 右侧：结果区 -->
+            <section class="result-section">
+                <!-- 识别结果 -->
+                <div class="card result-card">
+                    <div class="card-header">
+                        <h2>识别结果</h2>
+                        <div class="card-actions">
+                            <button id="copyBtn" class="btn btn-sm" disabled>📋 复制</button>
+                            <button id="exportBtn" class="btn btn-sm" disabled>💾 导出</button>
+                        </div>
+                    </div>
+                    <div id="resultArea" class="result-area">
+                        <p class="placeholder-text">识别结果将显示在这里...</p>
+                    </div>
+                    <div id="resultStats" class="result-stats hidden">
+                        <span id="charCount">0 字符</span>
+                        <span id="lineCount">0 行</span>
+                    </div>
+                </div>
+
+                <!-- 历史记录 -->
+                <div class="card history-card">
+                    <div class="card-header">
+                        <h2>历史记录</h2>
+                        <button id="clearHistoryBtn" class="btn btn-sm">🗑️ 清空</button>
+                    </div>
+                    <div id="historyList" class="history-list">
+                        <p class="placeholder-text">暂无历史记录</p>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- 状态栏 -->
+        <footer class="statusbar">
+            <span id="engineStatus" class="status-item">🔄 引擎初始化中...</span>
+            <span id="progressText" class="status-item hidden"></span>
+        </footer>
+    </div>
+
+    <!-- 导出菜单（放在 body 级别，避免被容器 overflow 裁剪） -->
+    <div id="exportMenu" class="dropdown-menu hidden">
+        <button class="menu-item" data-format="TXT">📄 导出为 TXT</button>
+        <button class="menu-item" data-format="JSON">📋 导出为 JSON</button>
+        <button class="menu-item" data-format="Excel">📊 导出为 Excel</button>
+    </div>
+
+    <!-- 设置面板 -->
+    <div id="settingsPanel" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>设置</h3>
+                <button id="closeSettingsBtn" class="btn-close">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>OCR 引擎路径:</label>
+                    <input type="text" id="exePath" class="input" placeholder="默认: 同目录下的 PaddleOCR-json">
+                </div>
+                <div class="form-group">
+                    <label>检测阈值 (0.1-1.0):</label>
+                    <input type="range" id="detThreshold" min="0.1" max="1" step="0.05" value="0.3">
+                    <span id="detThresholdValue">0.3</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="saveSettingsBtn" class="btn btn-primary">保存</button>
+                <button id="cancelSettingsBtn" class="btn">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast 通知 -->
+    <div id="toast" class="toast hidden">
+        <span id="toastMessage"></span>
+    </div>
+    <script>
+        // DOM 加载后隐藏 loading
+        window.addEventListener('load', function() {
+            setTimeout(function() {
+                var loading = document.getElementById('loadingScreen');
+                if (loading) {
+                    loading.classList.add('fade-out');
+                    setTimeout(function() {
+                        loading.remove();
+                    }, 200);
+                }
+            }, 50);
+        });
+    </script>
+</body>
+</html>

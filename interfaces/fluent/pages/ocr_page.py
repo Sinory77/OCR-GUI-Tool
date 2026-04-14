@@ -188,36 +188,46 @@ class DropArea(QFrame):
             event.acceptProposedAction()
 
 
-class OCRWorker(QThread):
-    """OCR 识别工作线程 - 直接复用主线程 OCR 实例"""
-    finished = Signal(dict)
+class SingleOCRWorker(QThread):
+    """单图 OCR 识别工作线程 - 自动判断普通图/超长图"""
+    progress = Signal(int, int)  # 当前切片, 总切片数（普通图为 1/1）
+    finished = Signal(dict)  # 识别结果
     error = Signal(str)
     
-    def __init__(self, ocr_engine, image_path):
+    def __init__(self, ocr_engine, image_path, config=None):
         super().__init__()
         self.ocr_engine = ocr_engine
         self.image_path = image_path
+        self.config = config
     
     def run(self):
         try:
-            # 直接使用已初始化的 OCR 实例（线程安全）
-            result = self.ocr_engine.recognize(self.image_path)
+            # 使用引擎的自动识别方法（自动判断普通图/超长图）
+            def on_progress(current, total):
+                self.progress.emit(current, total)
+            
+            result = self.ocr_engine.recognize_auto(
+                self.image_path,
+                config=self.config,
+                progress_callback=on_progress
+            )
             self.finished.emit(result)
         except Exception as e:
             self.error.emit(str(e))
 
 
 class BatchOCRWorker(QThread):
-    """批量 OCR 识别工作线程 - 复用主线程 OCR 实例"""
+    """批量 OCR 识别工作线程 - 复用主线程 OCR 实例，支持超长图切片"""
     progress = Signal(int, int, str)  # 当前进度, 总数, 当前文件名
     finished_one = Signal(str, dict)  # 文件路径, 识别结果
     finished_all = Signal(list)  # 所有结果列表
     error = Signal(str)
-    
-    def __init__(self, ocr_engine, file_paths):
+
+    def __init__(self, ocr_engine, file_paths, config=None):
         super().__init__()
         self.ocr_engine = ocr_engine
         self.file_paths = file_paths
+        self.config = config
     
     def run(self):
         results = []
@@ -226,7 +236,8 @@ class BatchOCRWorker(QThread):
         for i, file_path in enumerate(self.file_paths):
             try:
                 self.progress.emit(i + 1, total, os.path.basename(file_path))
-                result = self.ocr_engine.recognize(file_path)
+                # 使用 recognize_auto 自动判断是否需要切片
+                result = self.ocr_engine.recognize_auto(file_path, self.config)
                 
                 # 提取纯文本（已在 recognize 中处理）
                 texts = result.get("texts", [])
@@ -696,15 +707,18 @@ class OCRPage(QWidget):
                 # 绿色 - 已就绪
                 self.status_icon.setPixmap(_create_status_dot("#4CAF50"))
                 self.status_label.setText("OCR 引擎已就绪")
-                InfoBar.success(
-                    title="引擎就绪",
-                    content="OCR 引擎初始化完成，可以开始识别",
-                    orient=Qt.Horizontal,
-                    isClosable=True,
-                    position=InfoBarPosition.TOP,
-                    duration=3000,
-                    parent=self
-                )
+                # 只在首次就绪时弹出提示，避免切换页面时重复弹出
+                if not getattr(self, '_engine_ready_notified', False):
+                    self._engine_ready_notified = True
+                    InfoBar.success(
+                        title="引擎就绪",
+                        content="OCR 引擎初始化完成，可以开始识别",
+                        orient=Qt.Horizontal,
+                        isClosable=True,
+                        position=InfoBarPosition.TOP,
+                        duration=3000,
+                        parent=self
+                    )
             else:
                 # 红色 - 未就绪
                 self.status_icon.setPixmap(_create_status_dot("#F44336"))
@@ -898,10 +912,10 @@ class OCRPage(QWidget):
         self.progress_bar.setVisible(True)
         self.progress_bar.start()
         
-        # 同步执行 OCR
+        # 同步执行 OCR（自动判断是否需要切片）
         try:
             engine = self.main_window.ocr_engine
-            result = engine.recognize(self.current_image_path)
+            result = engine.recognize_auto(self.current_image_path, self.config)
             self.onOCRFinished(result)
         except Exception as e:
             self.onOCRError(str(e))
@@ -959,10 +973,10 @@ class OCRPage(QWidget):
         # 高亮当前项
         self.file_list_widget.setCurrentRow(self.batch_current_index)
         
-        # 同步执行 OCR
+        # 同步执行 OCR（自动判断是否需要切片）
         try:
             engine = self.main_window.ocr_engine
-            result = engine.recognize(file_path)
+            result = engine.recognize_auto(file_path, self.config)
             self._on_batch_item_finished(result)
         except Exception as e:
             self._on_batch_item_error(str(e))
@@ -1294,7 +1308,8 @@ class OCRPage(QWidget):
         # 启动批量工作线程
         self.batch_worker = BatchOCRWorker(
             self.main_window.ocr_engine,
-            self.batch_file_paths
+            self.batch_file_paths,
+            self.config
         )
         self.batch_worker.progress.connect(self.onBatchProgress)
         self.batch_worker.finished_one.connect(self.onBatchOneFinished)

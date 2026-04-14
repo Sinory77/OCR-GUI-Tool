@@ -21,12 +21,11 @@ LANGUAGES = {
     "한국어": "config_korean.txt",
 }
 
-# 默认 OCR 参数
+# 默认 OCR 参数（不再包含 limit_side_len，使用 PaddleOCR-json 默认值 960）
 DEFAULT_ARGS = {
     "cls": True,              # 启用方向分类
     "use_angle_cls": True,    # 启用方向分类
     "enable_mkldnn": True,    # 启用 CPU 加速
-    "limit_side_len": 960,    # 图像边长限制
     "det_db_thresh": 0.3,      # 检测阈值
     "det_db_box_thresh": 0.5, # 检测框阈值
     "det_db_unclip_ratio": 1.6, # 检测框扩展比例
@@ -86,7 +85,10 @@ class ConfigManager:
             "auto_copy": False,
             "theme": "跟随系统",
             "confidence_threshold": 50,
-            "auto_detect": False,  # 自动检测开关状态
+            "auto_detect": False,       # 自动检测开关状态
+            "long_image_mode": True,    # 超长图切片识别模式（默认开启）
+            "slice_height": 1500,       # 切片高度（像素）
+            "slice_overlap": 200,       # 切片重叠像素（防止截断文字）
         }
 
     def save(self):
@@ -171,6 +173,30 @@ class ConfigManager:
     def set_scan_subdirs(self, enabled: bool):
         """设置是否扫描子目录"""
         return self.set("scan_subdirs", enabled)
+
+    def get_long_image_mode(self) -> bool:
+        """获取超长图切片识别模式"""
+        return self.get("long_image_mode", True)
+
+    def set_long_image_mode(self, enabled: bool):
+        """设置超长图切片识别模式"""
+        return self.set("long_image_mode", enabled)
+
+    def get_slice_height(self) -> int:
+        """获取切片高度（像素）"""
+        return self.get("slice_height", 2000)
+
+    def set_slice_height(self, height: int):
+        """设置切片高度（像素）"""
+        return self.set("slice_height", height)
+
+    def get_slice_overlap(self) -> int:
+        """获取切片重叠像素"""
+        return self.get("slice_overlap", 100)
+
+    def set_slice_overlap(self, overlap: int):
+        """设置切片重叠像素"""
+        return self.set("slice_overlap", overlap)
 
     def get_history_storage_limit(self) -> int:
         """获取历史记录存储上限"""

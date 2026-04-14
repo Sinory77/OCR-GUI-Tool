@@ -420,6 +420,20 @@ class SettingsPage(ScrollArea):
         self.engine_card = OcrEngineSettingCard(self.scrollWidget)
         self.ocr_group.addSettingCard(self.engine_card)
 
+        # 切片高度 - SpinBoxSettingCard
+        self.slice_height_card = SpinBoxSettingCard(
+            icon=FluentIcon.LAYOUT,
+            title="切片高度",
+            content="每个切片的高度（像素），建议 1000~2000，过大可能导致识别不全",
+            min_val=500,
+            max_val=4096,
+            default_val=self.config.get_slice_height(),
+            suffix="px",
+            parent=self.ocr_group
+        )
+        self.slice_height_card.spin_box.valueChanged.connect(self._on_slice_height_changed)
+        self.ocr_group.addSettingCard(self.slice_height_card)
+
         # 扫描子目录 - SwitchSettingCard
         self.scan_subdirs_card = SwitchSettingCard(
             icon=FluentIcon.FOLDER,
@@ -508,6 +522,10 @@ class SettingsPage(ScrollArea):
     def _on_auto_copy_changed(self, checked):
         """自动复制设置变化 - 核心层处理"""
         self.config.set_auto_copy(checked)
+
+    def _on_slice_height_changed(self, value: int):
+        """切片高度变化"""
+        self.config.set_slice_height(value)
 
     def _on_scan_subdirs_changed(self, checked: bool):
         """扫描子目录开关变化 - 核心层处理"""

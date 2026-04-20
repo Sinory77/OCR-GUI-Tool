@@ -2,25 +2,41 @@
 # 核心层截图功能，不依赖任何界面
 
 import os
+import sys
 import tempfile
 import ctypes
 import time
 import threading
+import logging
 from ctypes import wintypes
+from typing import Optional, Tuple
+from pathlib import Path
+
+# 配置日志
+logger = logging.getLogger(__name__)
+
+# 仅在 Windows 平台导入 Windows API
+if sys.platform == 'win32':
+    # Windows API
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+else:
+    user32 = None
+    kernel32 = None
+    logger.warning(f"截图功能仅支持 Windows 平台，当前平台: {sys.platform}")
 
 
-# Windows API
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
-
-
-def capture_screen_to_temp():
+def capture_screen_to_temp() -> Optional[str]:
     """
     截取全屏并保存到临时文件
     
     Returns:
-        str: 临时文件路径，失败返回 None
+        临时文件路径，失败返回 None
     """
+    if sys.platform != 'win32':
+        logger.error("截图功能仅支持 Windows 平台")
+        return None
+    
     try:
         # 优先使用 mss 库（最可靠）
         import mss
@@ -29,36 +45,31 @@ def capture_screen_to_temp():
         with mss.mss() as sct:
             temp_path = os.path.join(tempfile.gettempdir(), 'ocr_screenshot.png')
             sct.shot(mon=-1, output=temp_path)
+            logger.debug(f"截图成功 (mss): {temp_path}")
             return temp_path
             
     except ImportError:
-        pass
+        logger.debug("mss 库未安装，尝试备用方案")
+    except Exception as e:
+        logger.warning(f"mss 截图失败: {e}，尝试备用方案")
     
-    # 备用方案：使用 win32gui + PIL
+    # 备用方案：使用 PIL ImageGrab
     try:
-        import win32gui
-        import win32ui
-        import win32con
-        from PIL import Image, ImageGrab
+        from PIL import ImageGrab
         
-        # 使用 PIL 的 ImageGrab（跨平台兼容性好）
         img = ImageGrab.grab()
         temp_path = os.path.join(tempfile.gettempdir(), 'ocr_screenshot.png')
         img.save(temp_path, 'PNG')
+        logger.debug(f"截图成功 (PIL): {temp_path}")
         return temp_path
         
     except ImportError:
-        pass
-    
-    try:
-        from PIL import ImageGrab
-        img = ImageGrab.grab()
-        temp_path = os.path.join(tempfile.gettempdir(), 'ocr_screenshot.png')
-        img.save(temp_path, 'PNG')
-        return temp_path
+        logger.debug("PIL 库未安装")
     except Exception as e:
-        print(f"截图失败: {e}")
-        return None
+        logger.warning(f"PIL 截图失败: {e}")
+    
+    logger.error("所有截图方案均失败")
+    return None
 
 
 def capture_screen_to_pixmap():
@@ -68,6 +79,10 @@ def capture_screen_to_pixmap():
     Returns:
         QPixmap: 屏幕截图，失败返回 None
     """
+    if sys.platform != 'win32':
+        logger.error("截图功能仅支持 Windows 平台")
+        return None
+    
     try:
         from PySide6.QtGui import QPixmap, QImage
         import io
@@ -80,9 +95,13 @@ def capture_screen_to_pixmap():
             with mss.mss() as sct:
                 temp_path = os.path.join(tempfile.gettempdir(), 'ocr_bg_temp.png')
                 sct.shot(mon=-1, output=temp_path)
-                return QPixmap(temp_path)
+                pixmap = QPixmap(temp_path)
+                logger.debug(f"截图成功 (mss -> QPixmap)")
+                return pixmap
         except ImportError:
             pass
+        except Exception as e:
+            logger.warning(f"mss 截图失败: {e}")
         
         # 备用：使用 PIL ImageGrab
         try:
@@ -96,9 +115,13 @@ def capture_screen_to_pixmap():
             img_bytes = img.tobytes('raw', 'RGB')
             width, height = img.size
             qimage = QImage(img_bytes, width, height, width * 3, QImage.Format.Format_RGB888)
-            return QPixmap.fromImage(qimage)
+            pixmap = QPixmap.fromImage(qimage)
+            logger.debug(f"截图成功 (PIL -> QPixmap)")
+            return pixmap
         except ImportError:
             pass
+        except Exception as e:
+            logger.warning(f"PIL 截图失败: {e}")
         
         # 最后备用：保存到临时文件再加载
         temp_path = capture_screen_to_temp()
@@ -108,17 +131,21 @@ def capture_screen_to_pixmap():
         return None
         
     except Exception as e:
-        print(f"截图失败: {e}")
+        logger.error(f"截图失败: {e}", exc_info=True)
         return None
 
 
-def capture_screen_as_bytes():
+def capture_screen_as_bytes() -> Tuple[Optional[bytes], int, int]:
     """
     截取全屏并返回字节数据
     
     Returns:
-        tuple: (bytes_data, width, height)，失败返回 (None, 0, 0)
+        (bytes_data, width, height)，失败返回 (None, 0, 0)
     """
+    if sys.platform != 'win32':
+        logger.error("截图功能仅支持 Windows 平台")
+        return None, 0, 0
+    
     try:
         import win32gui
         import win32ui
@@ -149,10 +176,14 @@ def capture_screen_as_bytes():
         win32gui.DeleteDC(mem_dc)
         win32gui.ReleaseDC(0, screen_dc)
         
+        logger.debug(f"截图成功 (Win32 API): {width}x{height}")
         return bmpstr, width, height
         
+    except ImportError:
+        logger.error("需要安装 pywin32 库")
+        return None, 0, 0
     except Exception as e:
-        print(f"截图失败: {e}")
+        logger.error(f"截图失败: {e}", exc_info=True)
         return None, 0, 0
 
 

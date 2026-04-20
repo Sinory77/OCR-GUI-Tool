@@ -3,8 +3,8 @@
 使用 qfluentwidgets 的 SettingCard 组件
 """
 
-from PySide6.QtCore import Qt, QAbstractAnimation
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
+from PySide6.QtCore import Qt, QAbstractAnimation, QTimer
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFileDialog
 from qfluentwidgets import (
     SubtitleLabel, BodyLabel,
     InfoBar, InfoBarPosition,
@@ -12,9 +12,14 @@ from qfluentwidgets import (
     SettingCardGroup, SettingCard,
     ExpandGroupSettingCard, ExpandLayout,
     OptionsSettingCard, SwitchSettingCard,
-    ComboBox, SpinBox, CardWidget, ScrollArea
+    ComboBox, SpinBox, CardWidget, ScrollArea, PushButton
 )
 from qfluentwidgets.common.config import OptionsConfigItem, OptionsValidator
+import os
+import logging
+from core.config import DEFAULT_OCR_EXE, DEFAULT_MODELS_PATH
+
+logger = logging.getLogger(__name__)
 
 
 class SpinBoxSettingCard(SettingCard):
@@ -49,6 +54,10 @@ class SpinBoxSettingCard(SettingCard):
 
 # 主题选项列表
 THEME_OPTIONS = ["浅色", "深色", "跟随系统"]
+
+# 语言选项列表
+from core.config import LANGUAGES
+LANGUAGE_OPTIONS = list(LANGUAGES.keys())
 
 # 创建主题配置项
 cfg_theme = OptionsConfigItem(
@@ -149,7 +158,8 @@ class OcrEngineSettingCard(ExpandGroupSettingCard):
         confidenceLayout.setContentsMargins(0, 0, 0, 0)
         confidenceLayout.setSpacing(8)
 
-        self.slider = __import__('qfluentwidgets', fromlist=['Slider']).Slider(Qt.Orientation.Horizontal)
+        from qfluentwidgets import Slider
+        self.slider = Slider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, 100)
         self.slider.setValue(self.config.get_confidence_threshold())
         self.slider.setFixedWidth(150)
@@ -164,6 +174,14 @@ class OcrEngineSettingCard(ExpandGroupSettingCard):
 
         confidenceLayout.addWidget(self.confidenceLabel)
         confidenceLayout.addWidget(self.slider)
+        
+        # 语言选择已移至识别页面，此处不再需要
+        # self.languageComboBox = ComboBox()
+        # self.languageComboBox.addItems(LANGUAGE_OPTIONS)
+        # current_language = self.config.get_language()
+        # if current_language in LANGUAGE_OPTIONS:
+        #     self.languageComboBox.setCurrentText(current_language)
+        # self.languageComboBox.currentTextChanged.connect(self._on_language_changed)
 
     def _add_groups(self):
         """添加各组设置项"""
@@ -192,6 +210,26 @@ class OcrEngineSettingCard(ExpandGroupSettingCard):
             "置信度阈值",
             "设置识别结果的置信度过滤",
             self.confidenceWidget
+        )
+        
+        # 语言选择组已移至识别页面
+        # self.addGroup(
+        #     FluentIcon.LANGUAGE,
+        #     "识别语言",
+        #     "选择 OCR 识别的语言",
+        #     self.languageComboBox
+        # )
+        
+        # 重置配置按钮
+        self.resetButton = PushButton("重置所有配置")
+        self.resetButton.setFixedWidth(135)
+        self.resetButton.clicked.connect(self._on_reset_config)
+        
+        self.addGroup(
+            FluentIcon.DELETE,
+            "重置配置",
+            "将所有配置恢复到默认值",
+            self.resetButton
         )
 
     # ──────────────────────────────────────────────────────────────
@@ -237,13 +275,15 @@ class OcrEngineSettingCard(ExpandGroupSettingCard):
 
     def _start_detect_thread(self):
         """异步执行搜索，使用 QTimer.singleShot 避免线程生命周期问题"""
-        from PySide6.QtCore import QTimer
-
         # 标记当前搜索任务，防止旧任务结果覆盖新任务
         self._detect_counter = getattr(self, '_detect_counter', 0) + 1
         current_id = self._detect_counter
 
         def _do_search():
+            # 显示搜索进度
+            self.autoDetectGroup.contentLabel.setText("正在搜索 PaddleOCR-json.exe...")
+            QTimer.singleShot(500, lambda: self.autoDetectGroup.contentLabel.setText("正在搜索 models 目录..."))
+            
             result = self.config.auto_detect_paths()
             # 仅处理最新一次搜索的结果，忽略旧任务
             if current_id == getattr(self, '_detect_counter', 0):
@@ -347,6 +387,73 @@ class OcrEngineSettingCard(ExpandGroupSettingCard):
         """置信度变化 - 核心层处理"""
         threshold = self.slider.value()
         self.config.set_confidence_threshold(threshold)
+        InfoBar.success(
+            title="设置已保存",
+            content=f"置信度阈值: {threshold}%",
+            position=InfoBarPosition.TOP,
+            parent=self.window()
+        )
+    
+    # 语言变化处理已移至识别页面
+    # def _on_language_changed(self, language):
+    #     """语言变化 - 核心层处理"""
+    #     self.config.set_language(language)
+    #     InfoBar.success(
+    #         title="设置已保存",
+    #         content=f"识别语言: {language}",
+    #         position=InfoBarPosition.TOP,
+    #         parent=self.window()
+    #     )
+    #     # 通知主窗口重新初始化 OCR 引擎
+    #     if hasattr(self, 'engine_auto_detect_success') and self.engine_auto_detect_success:
+    #         exe_path = self.config.get_ocr_exe_path()
+    #         models_path = self.config.get_models_path()
+    #         if exe_path and models_path:
+    #             self.engine_auto_detect_success(exe_path, models_path)
+    
+    def _on_reset_config(self):
+        """重置所有配置"""
+        from qfluentwidgets import MessageBox
+        from ..ui_utils import create_message_box
+        msg_box = create_message_box(
+            "重置配置",
+            "确定要将所有配置恢复到默认值吗？",
+            self.window()
+        )
+        
+        if msg_box.exec() == MessageBox.Yes:
+            # 重置配置
+            # 由于ConfigManager没有reset_config方法，我们手动重置每个配置项
+            self.config.set_ocr_exe_path(DEFAULT_OCR_EXE)
+            self.config.set_models_path(DEFAULT_MODELS_PATH)
+            self.config.set_language("简体中文")
+            self.config.set_ui_language("中文")
+            self.config.set_auto_copy(False)
+            self.config.set_theme("跟随系统")
+            self.config.set_confidence_threshold(50)
+            self.config.set_auto_detect(False)
+            self.config.set_long_image_mode(True)
+            self.config.set_slice_height(2000)
+            self.config.set_slice_overlap(100)
+            self.config.set_scan_subdirs(True)
+            self.config.set_history_storage_limit(100)
+            self.config.set_history_display_limit(50)
+            
+            # 更新界面
+            self.autoDetectSwitch.setChecked(False)
+            self.exePathGroup.contentLabel.setText(DEFAULT_OCR_EXE)
+            self.modelsPathGroup.contentLabel.setText(DEFAULT_MODELS_PATH)
+            self.slider.setValue(50)  # 默认置信度
+            # 语言选择已移至识别页面，此处不再需要
+            # self.languageComboBox.setCurrentText("简体中文")  # 默认语言
+            
+            # 显示成功信息
+            InfoBar.success(
+                title="重置成功",
+                content="所有配置已恢复到默认值",
+                position=InfoBarPosition.TOP,
+                parent=self.window()
+            )
 
 
 class SettingsPage(ScrollArea):
@@ -420,20 +527,6 @@ class SettingsPage(ScrollArea):
         self.engine_card = OcrEngineSettingCard(self.scrollWidget)
         self.ocr_group.addSettingCard(self.engine_card)
 
-        # 切片高度 - SpinBoxSettingCard
-        self.slice_height_card = SpinBoxSettingCard(
-            icon=FluentIcon.LAYOUT,
-            title="切片高度",
-            content="每个切片的高度（像素），建议 1000~2000，过大可能导致识别不全",
-            min_val=500,
-            max_val=4096,
-            default_val=self.config.get_slice_height(),
-            suffix="px",
-            parent=self.ocr_group
-        )
-        self.slice_height_card.spin_box.valueChanged.connect(self._on_slice_height_changed)
-        self.ocr_group.addSettingCard(self.slice_height_card)
-
         # 扫描子目录 - SwitchSettingCard
         self.scan_subdirs_card = SwitchSettingCard(
             icon=FluentIcon.FOLDER,
@@ -455,6 +548,34 @@ class SettingsPage(ScrollArea):
         self.auto_copy_card.switchButton.setChecked(self.config.get_auto_copy())
         self.auto_copy_card.switchButton.checkedChanged.connect(self._on_auto_copy_changed)
         self.ocr_group.addSettingCard(self.auto_copy_card)
+
+        # 超长图切片高度 - SpinBoxSettingCard
+        self.slice_height_card = SpinBoxSettingCard(
+            icon=FluentIcon.ZOOM,
+            title="切片高度",
+            content="超长图识别时的切片高度阈值（像素）",
+            min_val=500,
+            max_val=5000,
+            default_val=self.config.get_slice_height(),
+            suffix="px",
+            parent=self.ocr_group
+        )
+        self.slice_height_card.spin_box.valueChanged.connect(self._on_slice_height_changed)
+        self.ocr_group.addSettingCard(self.slice_height_card)
+
+        # 超长图切片重叠 - SpinBoxSettingCard
+        self.slice_overlap_card = SpinBoxSettingCard(
+            icon=FluentIcon.ZOOM_IN,
+            title="切片重叠",
+            content="相邻切片的重叠区域，防止文字被切断",
+            min_val=0,
+            max_val=500,
+            default_val=self.config.get_slice_overlap(),
+            suffix="px",
+            parent=self.ocr_group
+        )
+        self.slice_overlap_card.spin_box.valueChanged.connect(self._on_slice_overlap_changed)
+        self.ocr_group.addSettingCard(self.slice_overlap_card)
 
         # 历史记录存储上限 - SpinBoxSettingCard（官方样式）
         self.storage_limit_card = SpinBoxSettingCard(
@@ -496,6 +617,29 @@ class SettingsPage(ScrollArea):
         )
         self.theme_card.optionChanged.connect(self.onThemeChanged)
         self.ui_group.addSettingCard(self.theme_card)
+        
+        # 界面语言设置 - OptionsSettingCard
+        # 从配置中获取当前界面语言
+        current_ui_language = self.config.get_ui_language()
+        # 创建一个临时的OptionsConfigItem用于OptionsSettingCard
+        ui_language_config = OptionsConfigItem(
+            group="Interface",
+            name="ui_language",
+            default="中文",
+            validator=OptionsValidator(["中文", "English"])
+        )
+        # 设置当前值
+        ui_language_config.value = current_ui_language
+        # 创建OptionsSettingCard
+        self.ui_language_card = OptionsSettingCard(
+            icon=FluentIcon.LANGUAGE,
+            title="界面语言",
+            texts=["中文", "English"],
+            configItem=ui_language_config,
+            parent=self.ui_group
+        )
+        self.ui_language_card.optionChanged.connect(self._on_ui_language_changed)
+        self.ui_group.addSettingCard(self.ui_language_card)
 
     def add_about_card(self):
         """添加关于信息"""
@@ -505,10 +649,26 @@ class SettingsPage(ScrollArea):
             content="OCR GUI Tool v2.0 - 基于 PaddleOCR-json",
             parent=self.about_group
         )
+        
+        # 添加版本信息和链接
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        
+        self.versionLabel = BodyLabel("版本: 2.0.0", self.about_card)
+        self.versionLabel.move(20, 80)
+        
+        self.githubButton = PushButton("GitHub", self.about_card)
+        self.githubButton.setFixedWidth(100)
+        self.githubButton.move(20, 110)
+        self.githubButton.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com")))
+        
         self.about_group.addSettingCard(self.about_card)
 
     def onThemeChanged(self, theme):
         """切换主题 - 核心层处理"""
+        # 确保theme是字符串
+        if hasattr(theme, 'value'):
+            theme = theme.value
         theme_map = {
             "浅色": Theme.LIGHT,
             "深色": Theme.DARK,
@@ -518,14 +678,37 @@ class SettingsPage(ScrollArea):
             setTheme(theme_map[theme])
             # 保存到核心层
             self.config.set_theme(theme)
+            InfoBar.success(
+                title="设置已保存",
+                content=f"界面主题: {theme}",
+                position=InfoBarPosition.TOP,
+                parent=self
+            )
+    
+    def _on_ui_language_changed(self, language):
+        """切换界面语言"""
+        # 确保language是字符串
+        if hasattr(language, 'value'):
+            language = language.value
+        # 保存到核心层
+        self.config.set_ui_language(language)
+        InfoBar.success(
+            title="设置已保存",
+            content=f"界面语言: {language}",
+            position=InfoBarPosition.TOP,
+            parent=self
+        )
+        # 提示需要重启应用
+        InfoBar.warning(
+            title="提示",
+            content="界面语言变更需要重启应用才能生效",
+            position=InfoBarPosition.TOP,
+            parent=self
+        )
 
     def _on_auto_copy_changed(self, checked):
         """自动复制设置变化 - 核心层处理"""
         self.config.set_auto_copy(checked)
-
-    def _on_slice_height_changed(self, value: int):
-        """切片高度变化"""
-        self.config.set_slice_height(value)
 
     def _on_scan_subdirs_changed(self, checked: bool):
         """扫描子目录开关变化 - 核心层处理"""
@@ -554,6 +737,26 @@ class SettingsPage(ScrollArea):
         InfoBar.success(
             title="设置已保存",
             content=f"历史记录显示上限: {value} 条",
+            position=InfoBarPosition.TOP,
+            parent=self
+        )
+
+    def _on_slice_height_changed(self, value: int):
+        """切片高度变化 - 核心层处理"""
+        self.config.set_slice_height(value)
+        InfoBar.success(
+            title="设置已保存",
+            content=f"切片高度: {value}px，超过此高度的图片将自动切片识别",
+            position=InfoBarPosition.TOP,
+            parent=self
+        )
+
+    def _on_slice_overlap_changed(self, value: int):
+        """切片重叠变化 - 核心层处理"""
+        self.config.set_slice_overlap(value)
+        InfoBar.success(
+            title="设置已保存",
+            content=f"切片重叠: {value}px，相邻切片将重叠 {value} 像素",
             position=InfoBarPosition.TOP,
             parent=self
         )

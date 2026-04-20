@@ -1,0 +1,150 @@
+{
+  "id": "animal_quarantine",
+  "name": "动物检疫证明",
+  "description": "动物检疫合格证明（动物A/B）格式解析模板 - 适配OCR分行情况",
+  "rules": [
+    {
+      "name": "检疫证号",
+      "type": "regex",
+      "keyword": "",
+      "pattern": "No\\.([A-Z0-9]+)",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": false,
+      "use_next_line": true
+    },
+    {
+      "name": "货主",
+      "type": "regex",
+      "keyword": "",
+      "pattern": "(?:主|货)[\\s：:]*\\n([^\\n]+?)(?=\\n(?:主体识别代码|生产经营主体代码|联系|$))",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": true,
+      "use_next_line": true
+    },
+    {
+      "name": "主体识别代码",
+      "type": "regex",
+      "keyword": "",
+      "pattern": "(?:主体识别代码|生产经营主体代码)[\\s：:]*\\n?([0-9]{5,}|[^\\n]{10,}?)(?=\\n(?:联系|电话|$))",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": true,
+      "use_next_line": true
+    },
+    {
+      "name": "联系电话",
+      "type": "regex",
+      "keyword": "",
+      "pattern": "(?:联系)?电话[\\s：:]*(1[3-9]\\d{9})",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": false,
+      "use_next_line": true
+    },
+    {
+      "name": "动物种类",
+      "type": "regex",
+      "keyword": "",
+      "pattern": "(?:动\\s*物\\s*种\\s*类|动物种类)[\\s：:]*\\n?([^\\n]+?)(?=\\n(?:数量|$))",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": true,
+      "use_next_line": true
+    },
+    {
+      "name": "数量及单位",
+      "type": "regex",
+      "keyword": "",
+      "pattern": "(?:数量及单位)[\\s：:]*\\n?([^\\n]+?)(?=\\n(?:四川|$))",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": true,
+      "use_next_line": true
+    },
+    {
+      "name": "启运地点",
+      "type": "regex",
+      "keyword": "",
+      "pattern": "(?:启\\s*运\\s*地\\s*点|启运地点)[\\s：:]*([\\s\\S]+?)(?=\\n(?:到\\s*达|到达|$))",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": true,
+      "use_next_line": true
+    },
+    {
+      "name": "到达地点",
+      "type": "regex",
+      "keyword": "",
+      "pattern": "(?:到\\s*达\\s*地\\s*点|到达地点)[\\s：:]*([\\s\\S]+?)(?=\\n(?:用|途|龚|饲养|$))",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": true,
+      "use_next_line": true
+    },
+    {
+      "name": "用途",
+      "type": "regex",
+      "keyword": "",
+      "pattern": "(?:途|用)[\\s：:]*\\n?([^\\n]+?)(?=\\n(?:龚|承|系|$))",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": true,
+      "use_next_line": true
+    },
+    {
+      "name": "承运人",
+      "type": "regex",
+      "keyword": "",
+      "pattern": "(?:龚|让|成|王|洋|德康)[^\\n]*",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": true,
+      "use_next_line": true
+    },
+    {
+      "name": "车牌号",
+      "type": "regex",
+      "keyword": "",
+      "pattern": "(?:运载工具牌号|车牌号)[\\s：:]*([川沪津渝冀晋辽吉黑苏浙皖闽赣鲁豫鄂湘粤桂琼贵云陕甘青宁新][A-Z][A-Z0-9]+)",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": false,
+      "use_next_line": true
+    },
+    {
+      "name": "检疫证类型",
+      "type": "regex",
+      "keyword": "",
+      "pattern": "（((?:动物|产品)[A-Z]?)）",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": false,
+      "use_next_line": true
+    },
+    {
+      "name": "签发日期",
+      "type": "regex",
+      "keyword": "",
+      "pattern": "签发日期[\\s：:]*([^\\n]+?)(?=\\n|$)",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": false,
+      "use_next_line": true
+    }
+  ]
+}

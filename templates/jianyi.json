@@ -1,0 +1,97 @@
+{
+  "id": "576b8c32",
+  "name": "动物检疫证明模板",
+  "description": "适用于动物检疫合格证明的字段提取，支持货主、数量、地点等关键字段",
+  "rules": [
+    {
+      "name": "证明编号",
+      "type": "keyword",
+      "keyword": "No.",
+      "pattern": "",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": true,
+      "use_next_line": false
+    },
+    {
+      "name": "货主",
+      "type": "keyword",
+      "keyword": "货主",
+      "pattern": "",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": true,
+      "use_next_line": true
+    },
+    {
+      "name": "动物种类",
+      "type": "keyword",
+      "keyword": "动物种类",
+      "pattern": "",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": true,
+      "use_next_line": true
+    },
+    {
+      "name": "数量",
+      "type": "keyword",
+      "keyword": "数量及单位",
+      "pattern": "",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": true,
+      "use_next_line": true
+    },
+    {
+      "name": "启运地点",
+      "type": "keyword",
+      "keyword": "启运地点",
+      "pattern": "",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": true,
+      "use_next_line": true
+    },
+    {
+      "name": "到达地点",
+      "type": "keyword",
+      "keyword": "到达地点",
+      "pattern": "",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": true,
+      "use_next_line": true
+    },
+    {
+      "name": "用途",
+      "type": "keyword",
+      "keyword": "用途",
+      "pattern": "",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": true,
+      "use_next_line": true
+    },
+    {
+      "name": "签发日期",
+      "type": "keyword",
+      "keyword": "签发日期",
+      "pattern": "",
+      "line": 0,
+      "start": 0,
+      "end": 0,
+      "ignore_spaces": true,
+      "use_next_line": true
+    }
+  ],
+  "created_at": "",
+  "updated_at": ""
+}

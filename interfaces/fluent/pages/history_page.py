@@ -12,6 +12,7 @@ from qfluentwidgets import (
     FluentIcon, ListView, TextEdit, ListItemDelegate,
     MessageBox
 )
+from ..ui_utils import create_message_box
 
 
 class HistoryModel(QAbstractListModel):
@@ -268,12 +269,12 @@ class HistoryPage(QWidget):
 
     def clearHistory(self):
         """清空所有历史"""
-        message_box = MessageBox(
+        message_box = create_message_box(
             "确认清空",
             "确定要清空所有历史记录吗？此操作不可撤销。",
             self.window()
         )
-        if message_box.exec():
+        if message_box.exec() == MessageBox.Yes:
             self.main_window.result_manager.clear_history()
 
             InfoBar.success(

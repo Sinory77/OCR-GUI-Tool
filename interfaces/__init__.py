@@ -1,7 +1,6 @@
 # Interfaces 模块 - 界面层
-# 只负责 UI 交互，调用 core 模块实现功能
+# 基于 PySide6 + qfluentwidgets 构建的 Fluent Design 界面
 
-from .tkinter_ui import main as run_tkinter_ui
-from .web_ui import main as run_web_ui
+from .fluent.main_window import MainWindow
 
-__all__ = ['run_tkinter_ui', 'run_web_ui']
+__all__ = ['MainWindow']

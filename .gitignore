@@ -101,9 +101,14 @@ venv.bak/
 config.json
 history.json
 *.log
+nul
 
 # PaddleOCR-json 模型（太大，不需要上传）
 # PaddleOCR-json/
+
+# 本地配置和缓存目录
+.lingma/
+.workbuddy/
 
 # Windows
 Thumbs.db

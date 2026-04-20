@@ -17,7 +17,9 @@ from qfluentwidgets import MessageDialog, InfoBar, InfoBarPosition
 
 from .pages.ocr_page import OCRPage
 from .pages.history_page import HistoryPage
+from .pages.template_page import TemplatePage
 from .pages.settings_page import SettingsPage
+from .ui_utils import create_engine_config_dialog
 
 
 class MainWindow(FluentWindow):
@@ -60,11 +62,15 @@ class MainWindow(FluentWindow):
         from core.ocr_engine import get_ocr_engine
         from core.result_manager import get_result_manager
         from core.exporter import get_exporter
+        from core.async_worker import get_task_manager
         
         # 获取全局 OCR 引擎实例
         self.ocr_engine = get_ocr_engine()
         self.result_manager = get_result_manager()
         self.exporter = get_exporter()
+        
+        # 获取全局任务管理器
+        self.task_manager = get_task_manager()
     
     def loadTranslator(self):
         """加载翻译器"""
@@ -82,6 +88,9 @@ class MainWindow(FluentWindow):
         self.ocr_page = OCRPage(self)
         self.ocr_page.setObjectName("ocr_page")
         
+        self.template_page = TemplatePage(self)
+        self.template_page.setObjectName("template_page")
+        
         self.history_page = HistoryPage(self)
         self.history_page.setObjectName("history_page")
         
@@ -93,6 +102,13 @@ class MainWindow(FluentWindow):
             self.ocr_page,
             icon=FIF.VIEW,
             text="文字识别",
+            position=NavigationItemPosition.TOP
+        )
+        
+        self.addSubInterface(
+            self.template_page,
+            icon=FIF.LABEL,
+            text="模板管理",
             position=NavigationItemPosition.TOP
         )
         
@@ -141,7 +157,7 @@ class MainWindow(FluentWindow):
         engine_card.engine_auto_detect_success = on_auto_detect_success
 
     def _init_ocr_engine_on_startup(self):
-        """程序启动时初始化 OCR 引擎"""
+        """程序启动时异步初始化 OCR 引擎"""
         import os
         from core.config import get_config_manager
 
@@ -187,29 +203,52 @@ class MainWindow(FluentWindow):
                 "开启后在程序目录中自动搜索 PaddleOCR-json.exe 和 models"
             )
 
-        # 初始化引擎（延迟到后台执行，让窗口先显示）
+        # 异步初始化引擎（延迟到后台执行，让窗口先显示）
         if exe_path and models_path:
             # 显示初始化中状态（黄色）
             self.ocr_page.set_engine_initializing()
             
-            self.ocr_engine.exe_path = exe_path
-            self.ocr_engine.models_path = models_path
-            self.ocr_engine.language = config.get_language()
-            
-            # 使用 QTimer.singleShot 延迟初始化，避免阻塞窗口显示
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(100, lambda: self._delayed_init_engine())
+            # 使用异步工作线程初始化引擎
+            self._start_async_ocr_init(exe_path, models_path, config.get_language())
     
-    def _delayed_init_engine(self):
-        """后台延迟初始化 OCR 引擎（不阻塞窗口显示）"""
-        success = self.ocr_engine.initialize()
+    def _start_async_ocr_init(self, exe_path: str, models_path: str, language: str):
+        """启动异步 OCR 引擎初始化"""
+        from core.async_worker import OcrInitWorker
         
-        if not success:
+        # 创建工作线程
+        self.init_worker = OcrInitWorker(
+            ocr_engine=self.ocr_engine,
+            exe_path=exe_path,
+            models_path=models_path,
+            language=language,
+            parent=self
+        )
+        
+        # 连接信号
+        self.init_worker.finished.connect(self._on_ocr_init_finished)
+        self.init_worker.error.connect(self._on_ocr_init_error)
+        
+        # 启动线程
+        self.init_worker.start()
+    
+    def _on_ocr_init_finished(self, result: dict):
+        """OCR 引擎初始化完成回调"""
+        success = result.get("success", False)
+        message = result.get("message", "")
+        
+        if success:
+            # 初始化成功（绿色），显示通知
+            self.ocr_page.update_engine_status(show_notification=True)
+            print(f"[OCR] 引擎初始化成功: {message}")
+        else:
             # 初始化失败（红色）
             self.ocr_page.set_engine_error()
-        else:
-            # 初始化成功（绿色）
-            self.ocr_page.update_engine_status()
+            print(f"[OCR] 引擎初始化失败: {message}")
+    
+    def _on_ocr_init_error(self, error_msg: str):
+        """OCR 引擎初始化错误回调"""
+        self.ocr_page.set_engine_error()
+        print(f"[OCR] 引擎初始化异常: {error_msg}")
 
     def _on_stacked_widget_changed(self, index):
         """页面切换时检查 OCR 引擎状态（不重新初始化）"""
@@ -222,13 +261,7 @@ class MainWindow(FluentWindow):
 
     def _prompt_configure_engine(self):
         """提示用户配置 OCR 引擎"""
-        dialog = MessageDialog(
-            title="OCR 引擎未配置",
-            content="请先配置 OCR 引擎和模型目录路径，才能进行文字识别。\n您希望自动搜索还是手动指定？",
-            parent=self
-        )
-        dialog.yesButton.setText("自动搜索")
-        dialog.cancelButton.setText("手动设置")
+        dialog = create_engine_config_dialog(parent=self)
 
         dialog.yesSignal.connect(self._auto_detect_and_init_engine)
         dialog.cancelSignal.connect(self._switch_to_settings)
@@ -244,22 +277,28 @@ class MainWindow(FluentWindow):
         self.navigationInterface.setCurrentItem("settings_page")
 
     def _reinit_ocr_engine(self, exe_path, models_path):
-        """配置修改后重新初始化 OCR 引擎"""
-        from core.ocr_engine import reset_ocr_engine
+        """配置修改后异步重新初始化 OCR 引擎"""
         from core.config import get_config_manager
-
-        # 重置并初始化引擎
-        self.ocr_engine = reset_ocr_engine(
+        from core.async_worker import OcrInitWorker
+        
+        # 显示初始化中状态
+        self.ocr_page.set_engine_initializing()
+        
+        # 创建工作线程
+        self.init_worker = OcrInitWorker(
+            ocr_engine=self.ocr_engine,
             exe_path=exe_path,
             models_path=models_path,
-            language=get_config_manager().get_language()
+            language=get_config_manager().get_language(),
+            parent=self
         )
-
-        # 初始化引擎
-        self.ocr_engine.initialize()
-
-        # 更新 OCR 页面的状态栏
-        self.ocr_page.update_engine_status()
+        
+        # 连接信号
+        self.init_worker.finished.connect(self._on_ocr_init_finished)
+        self.init_worker.error.connect(self._on_ocr_init_error)
+        
+        # 启动线程
+        self.init_worker.start()
     
     def onOcrCompleted(self, image_path):
         """OCR 识别完成"""
@@ -271,7 +310,12 @@ class MainWindow(FluentWindow):
     
     def closeEvent(self, event):
         """关闭窗口"""
+        # 停止所有异步任务
+        if hasattr(self, 'task_manager'):
+            self.task_manager.cleanup()
+        
         # 关闭 OCR 引擎
         if hasattr(self, 'ocr_engine'):
             self.ocr_engine.close()
+        
         super().closeEvent(event)

@@ -11,9 +11,9 @@ from PySide6.QtWidgets import (
     QPushButton, QFileDialog, QMessageBox,
     QMenu, QFrame, QListWidget, QListWidgetItem,
     QAbstractItemView, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractScrollArea
+    QHeaderView, QAbstractScrollArea, QApplication
 )
-from qfluentwidgets import TextBrowser, IndeterminateProgressBar, TableWidget
+from qfluentwidgets import TextBrowser, IndeterminateProgressBar, TableWidget, ListWidget
 from PySide6.QtCore import Qt, Signal, QThread, QSize, QTimer
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QPixmap
 from qfluentwidgets import (
@@ -188,71 +188,23 @@ class DropArea(QFrame):
             event.acceptProposedAction()
 
 
-class SingleOCRWorker(QThread):
-    """单图 OCR 识别工作线程 - 自动判断普通图/超长图"""
-    progress = Signal(int, int)  # 当前切片, 总切片数（普通图为 1/1）
-    finished = Signal(dict)  # 识别结果
+class OCRWorker(QThread):
+    """OCR 识别工作线程 - 已废弃，使用 core.async_worker.OcrRecognizeWorker 替代"""
+    finished = Signal(dict)
     error = Signal(str)
     
-    def __init__(self, ocr_engine, image_path, config=None):
+    def __init__(self, ocr_engine, image_path):
         super().__init__()
         self.ocr_engine = ocr_engine
         self.image_path = image_path
-        self.config = config
     
     def run(self):
         try:
-            # 使用引擎的自动识别方法（自动判断普通图/超长图）
-            def on_progress(current, total):
-                self.progress.emit(current, total)
-            
-            result = self.ocr_engine.recognize_auto(
-                self.image_path,
-                config=self.config,
-                progress_callback=on_progress
-            )
+            # 直接使用已初始化的 OCR 实例（线程安全）
+            result = self.ocr_engine.recognize(self.image_path)
             self.finished.emit(result)
         except Exception as e:
             self.error.emit(str(e))
-
-
-class BatchOCRWorker(QThread):
-    """批量 OCR 识别工作线程 - 复用主线程 OCR 实例，支持超长图切片"""
-    progress = Signal(int, int, str)  # 当前进度, 总数, 当前文件名
-    finished_one = Signal(str, dict)  # 文件路径, 识别结果
-    finished_all = Signal(list)  # 所有结果列表
-    error = Signal(str)
-
-    def __init__(self, ocr_engine, file_paths, config=None):
-        super().__init__()
-        self.ocr_engine = ocr_engine
-        self.file_paths = file_paths
-        self.config = config
-    
-    def run(self):
-        results = []
-        total = len(self.file_paths)
-        
-        for i, file_path in enumerate(self.file_paths):
-            try:
-                self.progress.emit(i + 1, total, os.path.basename(file_path))
-                # 使用 recognize_auto 自动判断是否需要切片
-                result = self.ocr_engine.recognize_auto(file_path, self.config)
-                
-                # 提取纯文本（已在 recognize 中处理）
-                texts = result.get("texts", [])
-                result["texts"] = texts
-                result["success"] = result["code"] == 100
-                
-                results.append({
-                    'path': file_path,
-                    'result': result
-                })
-                self.finished_one.emit(file_path, result)
-            except Exception as e:
-                self.error.emit(f"{os.path.basename(file_path)}: {str(e)}")
-        
-        self.finished_all.emit(results)
 
 
 class OCRPage(QWidget):
@@ -265,7 +217,11 @@ class OCRPage(QWidget):
         self.main_window = parent
         self.current_image_path = None
         self.ocr_result = None
-        self.worker = None
+        self.recognize_worker = None
+        self.batch_worker = None
+        self.scan_worker = None
+        self.export_worker = None
+        self.init_worker = None
         
         # 批量模式
         self.batch_file_paths = []  # 当前批量文件列表
@@ -373,7 +329,7 @@ class OCRPage(QWidget):
         is_batch = self.is_batch_mode and len(self.batch_file_paths) > 1
         if is_batch:
             # 批量模式
-            self.startBatchOCR()
+            self._start_batch_ocr()
         else:
             # 单图模式
             self.startOCR()
@@ -416,59 +372,19 @@ class OCRPage(QWidget):
         """)
         preview_layout.addWidget(self.image_label)
         
-        # 批量文件列表模式
-        self.file_list_widget = QListWidget(self.preview_stack)
+        # 批量文件列表模式 - 使用 qfluentwidgets 的 ListWidget（自带 Fluent 风格滚动条）
+        self.file_list_widget = ListWidget(self.preview_stack)
         self.file_list_widget.setSpacing(2)
         self.file_list_widget.setIconSize(QSize(48, 48))
         self.file_list_widget.setSelectionMode(QAbstractItemView.SingleSelection)
         self.file_list_widget.itemClicked.connect(self._on_file_list_item_clicked)
         self.file_list_widget.itemDoubleClicked.connect(self._on_file_list_item_double_clicked)
         self.file_list_widget.setVisible(False)  # 默认隐藏
+        # 只设置必要的样式，滚动条由 ListWidget 自动管理
         self.file_list_widget.setStyleSheet("""
-            QListWidget {
+            ListWidget {
                 border: none;
                 background-color: transparent;
-            }
-            QListWidget::item {
-                padding: 4px;
-                border-radius: 4px;
-                min-height: 56px;
-            }
-            QListWidget::item:selected {
-                background-color: rgba(0, 120, 212, 0.2);
-            }
-            QListWidget::item:hover {
-                background-color: rgba(0, 0, 0, 0.05);
-            }
-            QScrollBar:vertical {
-                width: 6px;
-                background: transparent;
-            }
-            QScrollBar::handle:vertical {
-                background: rgba(0, 0, 0, 0.2);
-                border-radius: 3px;
-                min-height: 30px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: rgba(0, 0, 0, 0.3);
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-            QScrollBar:horizontal {
-                height: 6px;
-                background: transparent;
-            }
-            QScrollBar::handle:horizontal {
-                background: rgba(0, 0, 0, 0.2);
-                border-radius: 3px;
-                min-width: 30px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background: rgba(0, 0, 0, 0.3);
-            }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-                width: 0px;
             }
         """)
         
@@ -602,12 +518,24 @@ class OCRPage(QWidget):
     
     def _load_list_thumbnail(self, file_path: str, item: QListWidgetItem):
         """异步加载列表缩略图"""
-        def load_thumbnail():
-            pixmap = _get_file_thumbnail(file_path, 48)
-            if item.listWidget():  # 检查 item 是否还在列表中
-                item.setIcon(pixmap)
+        from core.async_worker import ThumbnailLoadWorker
         
-        QTimer.singleShot(0, load_thumbnail)
+        worker = ThumbnailLoadWorker(
+            file_path=file_path,
+            size=48,
+            parent=self
+        )
+        
+        # 使用 lambda 捕获 file_path 和 item
+        def on_finished(result):
+            if result.get("success", False):
+                pixmap = result.get("pixmap")
+                # 检查 item 是否还在列表中
+                if item.listWidget() and pixmap:
+                    item.setIcon(pixmap)
+        
+        worker.finished.connect(on_finished)
+        worker.start()
     
     def _on_file_list_item_clicked(self, item: QListWidgetItem):
         """点击列表项"""
@@ -699,17 +627,21 @@ class OCRPage(QWidget):
         
         return layout
 
-    def update_engine_status(self):
-        """由 MainWindow 调用，初始化引擎后更新状态栏"""
+    def update_engine_status(self, show_notification: bool = False):
+        """由 MainWindow 调用，初始化引擎后更新状态栏
+        
+        Args:
+            show_notification: 是否显示通知提示框（默认 False，只在首次初始化时显示）
+        """
         if hasattr(self.main_window, 'ocr_engine'):
             engine = self.main_window.ocr_engine
             if engine._initialized:
                 # 绿色 - 已就绪
                 self.status_icon.setPixmap(_create_status_dot("#4CAF50"))
                 self.status_label.setText("OCR 引擎已就绪")
-                # 只在首次就绪时弹出提示，避免切换页面时重复弹出
-                if not getattr(self, '_engine_ready_notified', False):
-                    self._engine_ready_notified = True
+                
+                # 只在首次初始化时显示通知
+                if show_notification:
                     InfoBar.success(
                         title="引擎就绪",
                         content="OCR 引擎初始化完成，可以开始识别",
@@ -747,7 +679,7 @@ class OCRPage(QWidget):
             self.loadImage(file_path)
     
     def _select_folder(self):
-        """选择文件夹"""
+        """选择文件夹 - 异步扫描"""
         folder_path = QFileDialog.getExistingDirectory(
             self,
             "选择文件夹",
@@ -756,19 +688,81 @@ class OCRPage(QWidget):
         )
 
         if folder_path:
-            image_files = self.drop_area._scan_folder_for_images(folder_path)
-            if image_files:
-                self._switch_to_batch_mode(image_files)
-            else:
-                InfoBar.warning(
-                    title="文件夹为空",
-                    content="该文件夹中没有找到图片文件",
-                    orient=Qt.Horizontal,
-                    isClosable=True,
-                    position=InfoBarPosition.TOP,
-                    duration=3000,
-                    parent=self
-                )
+            # 显示加载中提示
+            InfoBar.info(
+                title="扫描中",
+                content=f"正在扫描文件夹: {folder_path}",
+                orient=Qt.Horizontal,
+                isClosable=False,
+                position=InfoBarPosition.TOP,
+                duration=-1,  # 不自动关闭
+                parent=self
+            )
+            
+            # 使用异步工作线程扫描文件夹
+            from core.async_worker import FolderScanWorker
+            
+            self.scan_worker = FolderScanWorker(
+                folder_path=folder_path,
+                recursive=self.config.get_scan_subdirs(),
+                parent=self
+            )
+            
+            # 连接信号
+            self.scan_worker.finished.connect(self._on_folder_scan_finished)
+            self.scan_worker.error.connect(self._on_folder_scan_error)
+            
+            # 启动线程
+            self.scan_worker.start()
+    
+    def _on_folder_scan_finished(self, result: dict):
+        """文件夹扫描完成回调"""
+        # 关闭加载提示
+        for bar in self.findChildren(InfoBar):
+            if hasattr(bar, 'title') and bar.title == "扫描中":
+                bar.close()
+        
+        image_files = result.get("image_files", [])
+        count = result.get("count", 0)
+        
+        if image_files:
+            self._switch_to_batch_mode(image_files)
+            InfoBar.success(
+                title="扫描完成",
+                content=f"找到 {count} 个图片文件",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+                parent=self
+            )
+        else:
+            InfoBar.warning(
+                title="文件夹为空",
+                content="该文件夹中没有找到图片文件",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+                parent=self
+            )
+    
+    def _on_folder_scan_error(self, error_msg: str):
+        """文件夹扫描错误回调"""
+        # 关闭加载提示
+        for bar in self.findChildren(InfoBar):
+            if hasattr(bar, 'title') and bar.title == "扫描中":
+                bar.close()
+        
+        InfoBar.error(
+            title="扫描失败",
+            content=error_msg,
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=5000,
+            parent=self
+        )
 
     def _select_multiple_files(self):
         """选择多个文件"""
@@ -844,8 +838,20 @@ class OCRPage(QWidget):
         """切换语言（运行时动态选择，不保存配置）"""
         # 直接应用到引擎
         if hasattr(self.main_window, 'ocr_engine'):
-            self.main_window.ocr_engine.set_language(language)
-            self.status_label.setText(f"已切换语言: {language}")
+            success = self.main_window.ocr_engine.set_language(language)
+            if success:
+                self.status_label.setText(f"已切换语言: {language}")
+            else:
+                # 如果切换失败，可能是因为引擎未初始化或路径未设置
+                self.status_label.setText(f"语言切换失败: 请先配置 OCR 引擎路径")
+                # 提示用户配置引擎
+                from qfluentwidgets import InfoBar, InfoBarPosition
+                InfoBar.warning(
+                    title="提示",
+                    content="请先配置 OCR 引擎路径，才能切换语言",
+                    position=InfoBarPosition.TOP,
+                    parent=self
+                )
     
     def startOCR(self):
         """开始OCR识别（自动判断单图/批量）"""
@@ -901,27 +907,41 @@ class OCRPage(QWidget):
             self._start_single_ocr()
     
     def _start_single_ocr(self):
-        """单图OCR识别 - 同步执行（直接调用避免 UI 卡死）"""
+        """单图OCR识别 - 异步执行"""
         file_name = os.path.basename(self.current_image_path)[:30]
         
         self.state_tooltip = StateToolTip("正在识别", file_name, self)
         self.state_tooltip.move(self.state_tooltip.getSuitablePos())
         self.state_tooltip.show()
         
+        # 保存原始按钮文字
+        self._original_button_text = self.btn_recognize.text()
+        
+        # 禁用按钮并更改文字
         self.btn_recognize.setEnabled(False)
+        self.btn_recognize.setText("识别中...")
+        
         self.progress_bar.setVisible(True)
         self.progress_bar.start()
         
-        # 同步执行 OCR（自动判断是否需要切片）
-        try:
-            engine = self.main_window.ocr_engine
-            result = engine.recognize_auto(self.current_image_path, self.config)
-            self.onOCRFinished(result)
-        except Exception as e:
-            self.onOCRError(str(e))
+        # 使用异步工作线程执行 OCR
+        from core.async_worker import OcrRecognizeWorker
+        
+        self.recognize_worker = OcrRecognizeWorker(
+            ocr_engine=self.main_window.ocr_engine,
+            image_path=self.current_image_path,
+            parent=self
+        )
+        
+        # 连接信号
+        self.recognize_worker.finished.connect(self.onOCRFinished)
+        self.recognize_worker.error.connect(self.onOCRError)
+        
+        # 启动线程
+        self.recognize_worker.start()
     
     def _start_batch_ocr(self):
-        """批量OCR识别"""
+        """批量OCR识别 - 异步执行"""
         self.batch_results = []  # 存储所有识别结果
         self.batch_current_index = 0
         self.batch_total = len(self.batch_file_paths)
@@ -945,86 +965,102 @@ class OCRPage(QWidget):
         self.btn_batch.setEnabled(False)
         self.file_list_widget.setEnabled(False)
         
-        # 开始第一个
-        self._batch_process_next()
+        # 使用异步工作线程执行批量 OCR
+        from core.async_worker import BatchOcrWorker
+        
+        self.batch_worker = BatchOcrWorker(
+            ocr_engine=self.main_window.ocr_engine,
+            file_paths=self.batch_file_paths,
+            parent=self
+        )
+        
+        # 连接信号
+        self.batch_worker.progress.connect(self.onBatchProgress)
+        self.batch_worker.finished.connect(self.onBatchItemFinished)
+        self.batch_worker.error.connect(self._on_batch_error)
+        
+        # 启动线程
+        self.batch_worker.start()
     
-    def _batch_process_next(self):
-        """处理下一张图片（使用异步避免阻塞UI）"""
-        if self.batch_current_index >= self.batch_total:
-            # 所有图片处理完成
+    def _on_batch_error(self, error_msg: str):
+        """批量识别错误回调"""
+        self.state_tooltip.hide()
+        
+        # 恢复按钮状态
+        self.btn_recognize.setEnabled(True)
+        self.btn_select.setEnabled(True)
+        self.btn_batch.setEnabled(True)
+        self.file_list_widget.setEnabled(True)
+        
+        InfoBar.error(
+            title="批量识别错误",
+            content=error_msg,
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=5000,
+            parent=self
+        )
+    
+    def onBatchProgress(self, progress_data: dict):
+        """批量识别进度更新"""
+        current = progress_data.get("current", 0)
+        total = progress_data.get("total", 0)
+        filename = progress_data.get("filename", "")
+        
+        # 更新进度显示
+        self.state_tooltip.setContent(f"已处理 {current}/{total}")
+        
+        # 更新状态栏
+        status_text = f"正在识别: {filename} ({current}/{total})"
+        self.status_label.setText(status_text)
+        
+        # 高亮当前项
+        for i, file_path in enumerate(self.batch_file_paths):
+            if os.path.basename(file_path) == filename:
+                self.file_list_widget.setCurrentRow(i)
+                break
+    
+    def onBatchItemFinished(self, result_data: dict):
+        """批量中单个图片识别完成"""
+        # 检查是否是全部完成的信号
+        if result_data.get("all_finished", False):
             self._on_batch_ocr_finished()
             return
         
-        # 异步执行，让UI有机会更新
-        QTimer.singleShot(10, self._do_batch_process)
-    
-    def _do_batch_process(self):
-        """实际执行批量处理"""
-        if self.batch_current_index >= self.batch_total:
-            return
-        
-        file_path = self.batch_file_paths[self.batch_current_index]
+        # 单个文件完成
+        file_path = result_data.get("file_path", "")
+        result = result_data.get("result", {})
         file_name = os.path.basename(file_path)
         
-        # 只显示进度行，单行显示更紧凑
-        progress_text = f"已处理 {self.batch_current_index}/{self.batch_total}"
-        self.state_tooltip.setContent(progress_text)
-        
-        # 高亮当前项
-        self.file_list_widget.setCurrentRow(self.batch_current_index)
-        
-        # 同步执行 OCR（自动判断是否需要切片）
-        try:
-            engine = self.main_window.ocr_engine
-            result = engine.recognize_auto(file_path, self.config)
-            self._on_batch_item_finished(result)
-        except Exception as e:
-            self._on_batch_item_error(str(e))
-    
-    def _on_batch_item_finished(self, result):
-        """批量中单个图片识别完成"""
-        file_path = self.batch_file_paths[self.batch_current_index]
-        file_name = os.path.basename(file_path)
-        
-        result_data = {
+        result_item = {
             'file_path': file_path,
             'file_name': file_name,
             'result': result
         }
-        self.batch_results.append(result_data)
+        self.batch_results.append(result_item)
         
         # 添加到历史记录
         self.main_window.result_manager.add_result(file_path, result)
         
         # 添加到结果表格
         self._add_result_to_table(file_name, result)
-        
-        # 添加到历史记录
-        self.main_window.result_manager.add_result(file_path, result)
-        
-        # 下一个
-        self.batch_current_index += 1
-        self._batch_process_next()
+    
+    def _batch_process_next(self):
+        """已废弃 - 使用 BatchOcrWorker 替代"""
+        pass
+    
+    def _do_batch_process(self):
+        """已废弃 - 使用 BatchOcrWorker 替代"""
+        pass
+    
+    def _on_batch_item_finished(self, result):
+        """已废弃 - 使用 onBatchItemFinished 替代"""
+        pass
     
     def _on_batch_item_error(self, error_msg):
-        """批量中单个图片识别出错"""
-        file_path = self.batch_file_paths[self.batch_current_index]
-        file_name = os.path.basename(file_path)
-        
-        # 添加错误结果
-        result_data = {
-            'file_path': file_path,
-            'file_name': file_name,
-            'result': {'code': -1, 'data': error_msg}
-        }
-        self.batch_results.append(result_data)
-        
-        # 添加到结果表格
-        self._add_result_to_table(file_name, {'code': -1, 'data': error_msg})
-        
-        # 下一个
-        self.batch_current_index += 1
-        self._batch_process_next()
+        """已废弃 - 使用 onBatchError 替代"""
+        pass
     
     def _add_result_to_table(self, file_name: str, result: dict):
         """添加结果到表格"""
@@ -1081,10 +1117,12 @@ class OCRPage(QWidget):
         self.file_list_widget.setEnabled(True)
         
         # 统计成功/失败数量
-        success_count = sum(1 for r in self.batch_results if r['result'].get('code') == 100)
+        success_count = sum(1 for r in self.batch_results if r.get('result', {}).get('code') == 100)
         fail_count = self.batch_total - success_count
         
-        self.status_label.setText(f"批量识别完成: {success_count} 成功, {fail_count} 失败")
+        # 更新右下角状态栏 - 显示最终结果
+        status_text = f"批量识别完成: {success_count} 成功, {fail_count} 失败 (共 {self.batch_total} 个)"
+        self.status_label.setText(status_text)
         
         # 启用复制和导出
         self.btn_copy.setEnabled(True)
@@ -1112,14 +1150,18 @@ class OCRPage(QWidget):
                 parent=self
             )
         
-        self.worker = None
+        self.batch_worker = None
     
     def onOCRFinished(self, result):
         """OCR识别完成（单图模式）"""
         self.state_tooltip.hide()
         self.progress_bar.stop()
         self.progress_bar.setVisible(False)
+        
+        # 恢复按钮状态和文字
         self.btn_recognize.setEnabled(True)
+        if hasattr(self, '_original_button_text'):
+            self.btn_recognize.setText(self._original_button_text)
         
         # 单图模式切换到文本框显示
         self.result_table.setVisible(False)
@@ -1170,14 +1212,18 @@ class OCRPage(QWidget):
                 parent=self
             )
         
-        self.worker = None
+        self.recognize_worker = None
     
     def onOCRError(self, error_msg):
         """OCR识别错误"""
         self.state_tooltip.hide()
         self.progress_bar.stop()
         self.progress_bar.setVisible(False)
+        
+        # 恢复按钮状态和文字
         self.btn_recognize.setEnabled(True)
+        if hasattr(self, '_original_button_text'):
+            self.btn_recognize.setText(self._original_button_text)
         
         self.result_text.setPlainText(f"识别出错: {error_msg}")
         self.status_label.setText(f"识别出错: {error_msg}")
@@ -1192,7 +1238,7 @@ class OCRPage(QWidget):
             parent=self
         )
         
-        self.worker = None
+        self.recognize_worker = None
     
     def copyResult(self):
         """复制结果"""
@@ -1212,7 +1258,7 @@ class OCRPage(QWidget):
                 )
     
     def exportResult(self, format_type):
-        """导出结果"""
+        """导出结果 - 异步执行"""
         if not self.ocr_result:
             return
         
@@ -1234,206 +1280,77 @@ class OCRPage(QWidget):
         )
         
         if file_path:
-            result = self.main_window.exporter.export(
-                self.ocr_result,
-                format_type,
-                file_path
+            # 显示导出中提示
+            InfoBar.info(
+                title="导出中",
+                content=f"正在导出为 {format_type} 格式...",
+                orient=Qt.Horizontal,
+                isClosable=False,
+                position=InfoBarPosition.TOP,
+                duration=-1,
+                parent=self
             )
             
-            if result:
-                InfoBar.success(
-                    title="导出成功",
-                    content=f"已保存到: {result}",
-                    orient=Qt.Horizontal,
-                    isClosable=True,
-                    position=InfoBarPosition.TOP,
-                    duration=5000,
-                    parent=self
-                )
-            else:
-                InfoBar.error(
-                    title="导出失败",
-                    content="无法导出文件",
-                    orient=Qt.Horizontal,
-                    isClosable=True,
-                    position=InfoBarPosition.TOP,
-                    duration=3000,
-                    parent=self
-                )
+            # 使用异步工作线程执行导出
+            from core.async_worker import ExportWorker
+            
+            self.export_worker = ExportWorker(
+                exporter=self.main_window.exporter,
+                results=self.ocr_result,
+                format_type=format_type,
+                output_path=file_path,
+                parent=self
+            )
+            
+            # 连接信号
+            self.export_worker.finished.connect(lambda r: self._on_export_finished(r))
+            self.export_worker.error.connect(self._on_export_error)
+            
+            # 启动线程
+            self.export_worker.start()
     
-    def startBatchOCR(self):
-        """开始批量OCR识别"""
-        if not hasattr(self, 'batch_file_paths') or not self.batch_file_paths:
-            InfoBar.warning(
-                title="提示",
-                content="请先批量选择图片",
+    def _on_export_finished(self, result: dict):
+        """导出完成回调"""
+        # 关闭加载提示
+        for bar in self.findChildren(InfoBar):
+            if hasattr(bar, 'title') and bar.title == "导出中":
+                bar.close()
+        
+        success = result.get("success", False)
+        output_path = result.get("output_path", "")
+        format_type = result.get("format_type", "")
+        
+        if success:
+            InfoBar.success(
+                title="导出成功",
+                content=f"已保存到: {output_path}",
                 orient=Qt.Horizontal,
                 isClosable=True,
                 position=InfoBarPosition.TOP,
-                duration=3000,
+                duration=5000,
                 parent=self
             )
-            return
-        
-        # 检查 main_window
-        if not hasattr(self, 'main_window') or not self.main_window:
+        else:
             InfoBar.error(
-                title="错误",
-                content="主窗口未初始化",
+                title="导出失败",
+                content="无法导出文件",
                 orient=Qt.Horizontal,
                 isClosable=True,
                 position=InfoBarPosition.TOP,
                 duration=3000,
                 parent=self
             )
-            return
-        
-        total = len(self.batch_file_paths)
-        
-        # 切换到表格显示
-        self.result_text.setVisible(False)
-        self.result_table.setVisible(True)
-        self.result_table.setRowCount(0)
-        
-        # 显示进度提示
-        self.state_tooltip = StateToolTip(f"正在批量识别...", f"已处理 0/{total}", self)
-        self.state_tooltip.move(self.state_tooltip.getSuitablePos())
-        self.state_tooltip.show()
-        
-        # 禁用按钮
-        self.btn_recognize.setEnabled(False)
-        self.btn_select.setEnabled(False)
-        self.btn_batch.setEnabled(False)
-        
-        # 启动批量工作线程
-        self.batch_worker = BatchOCRWorker(
-            self.main_window.ocr_engine,
-            self.batch_file_paths,
-            self.config
-        )
-        self.batch_worker.progress.connect(self.onBatchProgress)
-        self.batch_worker.finished_one.connect(self.onBatchOneFinished)
-        self.batch_worker.finished_all.connect(self.onBatchAllFinished)
-        self.batch_worker.error.connect(self.onBatchError)
-        self.batch_worker.start()
     
-    def onBatchProgress(self, current, total, filename):
-        """批量识别进度更新"""
-        # 只显示进度行，避免截断
-        self.state_tooltip.setContent(f"已处理 {current}/{total}")
-    
-    def onBatchOneFinished(self, file_path, result):
-        """批量识别中单个文件完成"""
-        # 添加到历史记录
-        self.main_window.result_manager.add_result(file_path, result)
-        
-        # 添加到结果表格
-        file_name = os.path.basename(file_path)
-        self._add_result_to_table(file_name, result)
-    
-    def onBatchAllFinished(self, results):
-        """批量识别全部完成"""
-        self.state_tooltip.hide()
-        
-        # 恢复按钮
-        self.btn_recognize.setEnabled(True)
-        self.btn_select.setEnabled(True)
-        self.btn_batch.setEnabled(True)
-        
-        # 恢复按钮文字
-        self._update_recognize_button_text()
-        
-        # 统计成功数量
-        success_count = sum(1 for r in results if r['result'].get('code') == 100)
-        
-        self.batch_results = results
-        self.status_label.setText(f"批量识别完成: {success_count}/{len(results)} 个成功")
-        
-        InfoBar.success(
-            title="批量识别完成",
-            content=f"成功 {success_count} 个，失败 {len(results) - success_count} 个",
-            orient=Qt.Horizontal,
-            isClosable=True,
-            position=InfoBarPosition.TOP,
-            duration=5000,
-            parent=self
-        )
-        
-        # 询问用户是否导出
-        self._ask_export_batch_results()
-    
-    def onBatchError(self, error_msg):
-        """批量识别错误"""
-        self.state_tooltip.hide()
+    def _on_export_error(self, error_msg: str):
+        """导出错误回调"""
+        # 关闭加载提示
+        for bar in self.findChildren(InfoBar):
+            if hasattr(bar, 'title') and bar.title == "导出中":
+                bar.close()
         
         InfoBar.error(
-            title="识别出错",
+            title="导出错误",
             content=error_msg,
-            orient=Qt.Horizontal,
-            isClosable=True,
-            position=InfoBarPosition.TOP,
-            duration=3000,
-            parent=self
-        )
-    
-    def _ask_export_batch_results(self):
-        """询问用户导出格式"""
-        if not hasattr(self, 'batch_results') or not self.batch_results:
-            return
-        
-        from qfluentwidgets import MessageBox
-        
-        message_box = MessageBox(
-            "导出结果",
-            "是否导出批量识别结果？",
-            self.window()
-        )
-        if message_box.exec():
-            self.exportBatchResults()
-    
-    def exportBatchResults(self):
-        """导出批量识别结果"""
-        if not hasattr(self, 'batch_results') or not self.batch_results:
-            return
-        
-        # 让用户选择导出格式
-        from qfluentwidgets import MessageBox
-        
-        message_box = MessageBox("选择导出格式", "请选择导出格式：", self.window())
-        message_box.yesButton.setText("TXT 文本")
-        message_box.cancelButton.setText("JSON")
-        message_box.yesButton.clicked.connect(lambda: self._do_export_batch("TXT"))
-        message_box.cancelButton.clicked.connect(lambda: self._do_export_batch("JSON"))
-        message_box.yesButton.setFocus()
-        message_box.exec()
-    
-    def _do_export_batch(self, export_format: str):
-        """执行批量导出"""
-        # 获取导出目录
-        dir_path = QFileDialog.getExistingDirectory(
-            self,
-            "选择导出目录",
-            ""
-        )
-        
-        if not dir_path:
-            return
-        
-        success_count = 0
-        for item in self.batch_results:
-            file_path = item['path']
-            result = item['result']
-            
-            if result.get('code') == 100:
-                base_name = os.path.splitext(os.path.basename(file_path))[0]
-                ext = "txt" if export_format == "TXT" else "json"
-                file_path_out = os.path.join(dir_path, f"{base_name}.{ext}")
-                self.main_window.exporter.export(result, export_format, file_path_out)
-                success_count += 1
-        
-        InfoBar.success(
-            title="导出完成",
-            content=f"已导出 {success_count} 个 {export_format} 文件到: {dir_path}",
             orient=Qt.Horizontal,
             isClosable=True,
             position=InfoBarPosition.TOP,

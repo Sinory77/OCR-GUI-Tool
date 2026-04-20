@@ -1362,8 +1362,8 @@ class OCRPage(QWidget):
         """截图识别"""
         # 先截取当前屏幕（主窗口还在，所以会包含主窗口内容）
         try:
-            from core.screenshot import capture_screen_to_temp
-            bg_path = capture_screen_to_temp()
+            from core.screenshot import get_screenshot_manager
+            bg_path = get_screenshot_manager().capture_full_screen(save_to_history=False)
         except:
             bg_path = None
         
@@ -1394,8 +1394,8 @@ class OCRPage(QWidget):
         # 延迟截图，等待屏幕渲染完成（增加延迟确保窗口完全显示）
         def do_screenshot():
             # 调用核心层截图
-            from core.screenshot import capture_screen_region
-            temp_path = capture_screen_region(x, y, width, height)
+            from core.screenshot import get_screenshot_manager
+            temp_path = get_screenshot_manager().capture_screen_region(x, y, width, height, save_to_history=False)
 
             # 关闭截图窗口
             if hasattr(self, 'screenshot_window') and self.screenshot_window:

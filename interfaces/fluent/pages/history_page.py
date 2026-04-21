@@ -274,7 +274,7 @@ class HistoryPage(QWidget):
             "确定要清空所有历史记录吗？此操作不可撤销。",
             self.window()
         )
-        if message_box.exec() == MessageBox.Yes:
+        if message_box.exec():
             self.main_window.result_manager.clear_history()
 
             InfoBar.success(
@@ -288,4 +288,9 @@ class HistoryPage(QWidget):
             )
 
             self.current_index = -1
+            self.result_text.clear()
+            self.img_path_label.setText("-")
+            self.btn_copy.setEnabled(False)
+            self.btn_view.setEnabled(False)
+            self.btn_delete.setEnabled(False)
             self.loadHistory()

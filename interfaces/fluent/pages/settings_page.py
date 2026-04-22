@@ -18,6 +18,8 @@ from qfluentwidgets.common.config import OptionsConfigItem, OptionsValidator
 import os
 import logging
 from core.config import DEFAULT_OCR_EXE, DEFAULT_MODELS_PATH
+from core.error_handler import ConfigError, handle_error, error_handling, ErrorType
+
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +92,7 @@ class OcrEngineSettingCard(ExpandGroupSettingCard):
         original_set_expand = self.setExpand
 
         def _safe_set_expand(isExpand: bool):
-            if self.expandAni.state() == QAbstractAnimation.Running:
+            if self.expandAni.state() == QAbstractAnimation.State.Running:
                 return  # 动画正在跑，忽略本次触发
             original_set_expand(isExpand)
 
@@ -335,6 +337,7 @@ class OcrEngineSettingCard(ExpandGroupSettingCard):
     # ──────────────────────────────────────────────────────────────
     # 手动浏览
     # ──────────────────────────────────────────────────────────────
+    @error_handling(ErrorType.CONFIG, "设置 OCR 引擎路径失败")
     def _browse_exe(self):
         """浏览选择 exe 文件 - 核心层处理"""
         from PySide6.QtWidgets import QFileDialog
@@ -344,22 +347,17 @@ class OcrEngineSettingCard(ExpandGroupSettingCard):
         )
         if path:
             success = self.config.set_ocr_exe_path(path)
-            if success:
-                self.exePathGroup.contentLabel.setText(path)
-                InfoBar.success(
-                    title="设置成功",
-                    content=f"已设置: {path}",
-                    position=InfoBarPosition.TOP,
-                    parent=self.window()
-                )
-            else:
-                InfoBar.error(
-                    title="设置失败",
-                    content="无法保存配置",
-                    position=InfoBarPosition.TOP,
-                    parent=self.window()
-                )
+            if not success:
+                raise ConfigError("无法保存配置")
+            self.exePathGroup.contentLabel.setText(path)
+            InfoBar.success(
+                title="设置成功",
+                content=f"已设置: {path}",
+                position=InfoBarPosition.TOP,
+                parent=self.window()
+            )
 
+    @error_handling(ErrorType.CONFIG, "设置 OCR 模型路径失败")
     def _browse_models(self):
         """浏览选择模型文件夹 - 核心层处理"""
         from PySide6.QtWidgets import QFileDialog
@@ -367,22 +365,17 @@ class OcrEngineSettingCard(ExpandGroupSettingCard):
         path = QFileDialog.getExistingDirectory(self, "选择模型文件夹")
         if path:
             success = self.config.set_models_path(path)
-            if success:
-                self.modelsPathGroup.contentLabel.setText(path)
-                InfoBar.success(
-                    title="设置成功",
-                    content=f"已设置: {path}",
-                    position=InfoBarPosition.TOP,
-                    parent=self.window()
-                )
-            else:
-                InfoBar.error(
-                    title="设置失败",
-                    content="无法保存配置",
-                    position=InfoBarPosition.TOP,
-                    parent=self.window()
-                )
+            if not success:
+                raise ConfigError("无法保存配置")
+            self.modelsPathGroup.contentLabel.setText(path)
+            InfoBar.success(
+                title="设置成功",
+                content=f"已设置: {path}",
+                position=InfoBarPosition.TOP,
+                parent=self.window()
+            )
 
+    @error_handling(ErrorType.CONFIG, "设置置信度阈值失败")
     def _on_confidence_changed(self):
         """置信度变化 - 核心层处理"""
         threshold = self.slider.value()
@@ -411,6 +404,7 @@ class OcrEngineSettingCard(ExpandGroupSettingCard):
     #         if exe_path and models_path:
     #             self.engine_auto_detect_success(exe_path, models_path)
     
+    @error_handling(ErrorType.CONFIG, "重置配置失败")
     def _on_reset_config(self):
         """重置所有配置"""
         from qfluentwidgets import MessageBox
@@ -663,6 +657,94 @@ class SettingsPage(ScrollArea):
         self.githubButton.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com")))
         
         self.about_group.addSettingCard(self.about_card)
+    
+    def add_performance_card(self):
+        """添加性能监控卡片（手风琴样式）"""
+        from qfluentwidgets import TextBrowser, PushButton
+        
+        # 创建手风琴卡片
+        self.performance_card = ExpandGroupSettingCard(
+            FluentIcon.INFO,
+            "性能监控",
+            "查看 OCR 识别的性能统计信息",
+            parent=self.about_group
+        )
+        
+        # 调整内部布局
+        self.performance_card.viewLayout.setContentsMargins(0, 0, 0, 0)
+        self.performance_card.viewLayout.setSpacing(0)
+        
+        # 防止展开动画连点竞态：动画运行中时忽略新触发
+        original_set_expand = self.performance_card.setExpand
+
+        def _safe_set_expand(isExpand: bool):
+            if self.performance_card.expandAni.state() == QAbstractAnimation.State.Running:
+                return  # 动画正在跑，忽略本次触发
+            original_set_expand(isExpand)
+
+        self.performance_card.setExpand = _safe_set_expand
+
+        # 覆写 _adjustViewSize，跳过隐藏的子项（库默认方法不处理可见性）
+        def _adjusted_adjust_view_size():
+            h = sum(w.sizeHint().height() + 3 for w in self.performance_card.widgets if w.isVisible())
+            self.performance_card.spaceWidget.setFixedHeight(h)
+            if self.performance_card.isExpand:
+                self.performance_card.setFixedHeight(self.performance_card.card.height() + h)
+
+        self.performance_card._adjustViewSize = _adjusted_adjust_view_size
+        
+        # 创建内容区域
+        self.content_widget = QWidget()
+        content_layout = QVBoxLayout(self.content_widget)
+        content_layout.setSpacing(12)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 创建文本浏览器显示性能统计
+        self.performance_browser = TextBrowser()
+        self.performance_browser.setStyleSheet("""
+            TextBrowser {
+                background-color: transparent;
+                border: 1px solid rgba(0, 0, 0, 0.1);
+                border-radius: 4px;
+                padding: 12px;
+                font-family: 'Segoe UI', Arial, sans-serif;
+                font-size: 12px;
+                min-height: 300px;
+                height: 300px;
+            }
+        """)
+        self.performance_browser.setFixedHeight(300)
+        content_layout.addWidget(self.performance_browser)
+        
+        # 添加刷新按钮（右对齐）
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        self.refresh_performance_btn = PushButton("刷新")
+        self.refresh_performance_btn.setFixedWidth(80)
+        self.refresh_performance_btn.clicked.connect(self._refresh_performance_stats)
+        button_layout.addWidget(self.refresh_performance_btn)
+        
+        content_layout.addLayout(button_layout)
+        
+        # 添加到手风琴卡片
+        self.performance_card.addGroup(
+            FluentIcon.CHAT,
+            "性能统计",
+            "OCR 识别的详细性能数据",
+            self.content_widget
+        )
+        
+        # 添加到组
+        self.about_group.addSettingCard(self.performance_card)
+        
+        # 调整视图大小
+        self.performance_card._adjustViewSize()
+        
+        # 初始刷新
+        self._refresh_performance_stats()
+    
+    
 
     def onThemeChanged(self, theme):
         """切换主题 - 核心层处理"""

@@ -19,17 +19,13 @@ _ocr_cache: Dict[str, Dict[str, Any]] = {}
 # 缓存大小限制
 MAX_CACHE_SIZE = 100
 
-# 识别结果缓存
-_ocr_cache: Dict[str, Dict[str, Any]] = {}
-# 缓存大小限制
-MAX_CACHE_SIZE = 100
-
 # 添加父目录到路径以便导入 PPOCR_api
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from api.PPOCR_api import GetOcrApi
 from .config import DEFAULT_OCR_EXE, DEFAULT_MODELS_PATH, DEFAULT_ARGS, LANGUAGES
-from .performance_monitor import get_performance_monitor, OperationTimer
+
+from .error_handler import OCREngineError, handle_error, error_handling, ErrorType
 
 # 状态码说明（官方文档）
 OCR_CODES = {
@@ -46,7 +42,15 @@ OCR_CODES = {
 
 
 class OCREngine:
-    """OCR 引擎封装类 - 管理 PaddleOCR-json 进程和识别任务"""
+    """OCR 引擎封装类 - 管理 PaddleOCR-json 进程和识别任务
+    
+    该类负责：
+    1. 初始化和管理 PaddleOCR-json 进程
+    2. 处理 OCR 识别请求
+    3. 支持普通图片和超长图片的识别
+    4. 维护识别结果缓存
+    5. 提供语言切换功能
+    """
     
     def __init__(self, exe_path: Optional[str] = None, models_path: Optional[str] = None, 
                  language: str = "简体中文", custom_args: Optional[Dict[str, Any]] = None):
@@ -160,6 +164,7 @@ class OCREngine:
         """
         return OCR_CODES.get(code, f"未知状态码: {code}")
     
+    @error_handling(ErrorType.OCR_ENGINE, "OCR 引擎初始化失败")
     def initialize(self) -> bool:
         """初始化 OCR 引擎
         
@@ -175,35 +180,26 @@ class OCREngine:
             self._initialized = False
             self.ocr = None
         
-        try:
-            # 验证路径存在性
-            if not Path(self.exe_path).exists():
-                logger.error(f"OCR 引擎文件不存在: {self.exe_path}")
-                return False
-            
-            if not Path(self.models_path).exists():
-                logger.error(f"模型文件夹不存在: {self.models_path}")
-                return False
-            
-            # 清理残留进程
-            self._cleanup_residual_processes()
-            
-            logger.info(f"[OCR] 正在初始化引擎: {self.exe_path}")
-            self.ocr = GetOcrApi(
-                self.exe_path,
-                self.models_path,
-                self.args,
-                ipcMode="pipe"
-            )
-            self._initialized = True
-            logger.info("[OCR] 引擎初始化成功")
-            return True
-        except FileNotFoundError:
-            logger.error(f"OCR 引擎文件未找到: {self.exe_path}")
-            return False
-        except Exception as e:
-            logger.error(f"OCR 引擎初始化失败: {e}", exc_info=True)
-            return False
+        # 验证路径存在性
+        if not Path(self.exe_path).exists():
+            raise OCREngineError(f"OCR 引擎文件不存在: {self.exe_path}")
+        
+        if not Path(self.models_path).exists():
+            raise OCREngineError(f"模型文件夹不存在: {self.models_path}")
+        
+        # 清理残留进程
+        self._cleanup_residual_processes()
+        
+        logger.info(f"[OCR] 正在初始化引擎: {self.exe_path}")
+        self.ocr = GetOcrApi(
+            self.exe_path,
+            self.models_path,
+            self.args,
+            ipcMode="pipe"
+        )
+        self._initialized = True
+        logger.info("[OCR] 引擎初始化成功")
+        return True
     
     def _get_image_hash(self, image_path: str) -> str:
         """
@@ -273,6 +269,7 @@ class OCREngine:
         _ocr_cache[cache_key] = result
         logger.debug(f"[OCR] 更新缓存，当前缓存大小: {len(_ocr_cache)}")
     
+    @error_handling(ErrorType.OCR_ENGINE, "OCR 识别失败")
     def recognize(self, image_path: str) -> Dict[str, Any]:
         """
         识别图片中的文字
@@ -285,8 +282,7 @@ class OCREngine:
         """
         # 验证输入
         if not image_path or not Path(image_path).exists():
-            logger.error(f"图片路径不存在: {image_path}")
-            return {"code": 200, "data": "图片路径不存在", "texts": [], "success": False}
+            raise OCREngineError(f"图片路径不存在: {image_path}")
         
         # 检查缓存
         cached_result = self._check_cache(image_path)
@@ -295,43 +291,41 @@ class OCREngine:
         
         if not self._initialized:
             if not self.initialize():
-                return {"code": -1, "data": "引擎初始化失败", "texts": [], "success": False}
+                raise OCREngineError("引擎初始化失败")
         
-        # 性能监控
-        with OperationTimer("ocr_recognize", image_size=Path(image_path).stat().st_size if Path(image_path).exists() else 0):
-            retry = 0
-            while retry < self.retry_count:
-                try:
-                    result = self.ocr.run(image_path)
-                    
-                    # 提取纯文本
-                    texts = []
-                    if result.get("code") == 100 and result.get("data"):
-                        for item in result["data"]:
-                            if isinstance(item, dict) and "text" in item:
-                                texts.append(item["text"])
-                    
-                    result["texts"] = texts
-                    result["success"] = result.get("code") == 100
-                    
-                    if result["success"]:
-                        logger.debug(f"[OCR] 识别成功，共 {len(texts)} 行文本")
-                        # 更新缓存
-                        self._update_cache(image_path, result)
-                    else:
-                        logger.warning(f"[OCR] 识别失败: {self.get_code_message(result.get('code', -1))}")
-                    
-                    return result
-                    
-                except Exception as e:
-                    retry += 1
-                    logger.error(f"[OCR] 识别过程出错 (尝试 {retry}/{self.retry_count}): {e}", exc_info=True)
-                    if retry >= self.retry_count:
-                        return {"code": -1, "data": f"识别过程出错: {str(e)}", "texts": [], "success": False}
-                    # 等待一段时间后重试
-                    import time
-                    time.sleep(0.5)
+        retry = 0
+        while retry < self.retry_count:
+            try:
+                result = self.ocr.run(image_path)
+                
+                # 提取纯文本
+                texts = []
+                if result.get("code") == 100 and result.get("data"):
+                    for item in result["data"]:
+                        if isinstance(item, dict) and "text" in item:
+                            texts.append(item["text"])
+                
+                result["texts"] = texts
+                result["success"] = result.get("code") == 100
+                
+                if result["success"]:
+                    logger.debug(f"[OCR] 识别成功，共 {len(texts)} 行文本")
+                    # 更新缓存
+                    self._update_cache(image_path, result)
+                else:
+                    logger.warning(f"[OCR] 识别失败: {self.get_code_message(result.get('code', -1))}")
+                
+                return result
+                
+            except Exception as e:
+                retry += 1
+                if retry >= self.retry_count:
+                    raise OCREngineError(f"识别过程出错: {str(e)}", e)
+                # 等待一段时间后重试
+                import time
+                time.sleep(0.5)
     
+    @error_handling(ErrorType.OCR_ENGINE, "OCR 字节流识别失败")
     def recognize_bytes(self, image_bytes: bytes) -> Dict[str, Any]:
         """
         识别图片字节流
@@ -343,12 +337,11 @@ class OCREngine:
             识别结果
         """
         if not image_bytes:
-            logger.error("图片字节数据为空")
-            return {"code": -1, "data": "图片字节数据为空", "texts": [], "success": False}
+            raise OCREngineError("图片字节数据为空")
         
         if not self._initialized:
             if not self.initialize():
-                return {"code": -1, "data": "引擎初始化失败", "texts": [], "success": False}
+                raise OCREngineError("引擎初始化失败")
         
         retry = 0
         while retry < self.retry_count:
@@ -372,9 +365,8 @@ class OCREngine:
                 
             except Exception as e:
                 retry += 1
-                logger.error(f"[OCR] 字节流识别过程出错 (尝试 {retry}/{self.retry_count}): {e}", exc_info=True)
                 if retry >= self.retry_count:
-                    return {"code": -1, "data": f"识别过程出错: {str(e)}", "texts": [], "success": False}
+                    raise OCREngineError(f"字节流识别出错: {str(e)}", e)
                 # 等待一段时间后重试
                 import time
                 time.sleep(0.5)
@@ -437,6 +429,7 @@ class OCREngine:
         else:
             return self.recognize(image_path)
 
+    @error_handling(ErrorType.OCR_ENGINE, "OCR 超长图识别失败")
     def recognize_long_image(self, image_path: str, slice_height: int = 2000, 
                              overlap: int = 100, progress_callback: Optional[Callable[[int, int], None]] = None) -> Dict[str, Any]:
         """
@@ -460,15 +453,13 @@ class OCREngine:
         try:
             from PIL import Image
         except ImportError:
-            logger.error("[OCR] Pillow 未安装，切片识别不可用")
-            return {"code": -1, "data": "Pillow 库未安装，无法进行切片识别", "texts": [], "success": False}
+            raise OCREngineError("Pillow 库未安装，无法进行切片识别")
 
         # ── 读取图片 ────────────────────────────────────────────────
         try:
             img = Image.open(image_path)
         except Exception as e:
-            logger.error(f"[OCR] 图片打开失败: {e}")
-            return {"code": -1, "data": f"图片打开失败: {e}", "texts": [], "success": False}
+            raise OCREngineError(f"图片打开失败: {str(e)}", e)
 
         img_w, img_h = img.size
 
@@ -486,7 +477,7 @@ class OCREngine:
         if not self._initialized:
             if not self.initialize():
                 img.close()
-                return {"code": -1, "data": "引擎初始化失败", "texts": [], "success": False}
+                raise OCREngineError("引擎初始化失败")
 
         # 计算总切片数（用于进度报告）
         total_slices = 0
@@ -535,8 +526,7 @@ class OCREngine:
                         save_img = save_img.convert("RGB")
                     save_img.save(tmp_path, format="PNG", optimize=True, compress_level=5)
                 except Exception as e:
-                    logger.error(f"[OCR] 保存切片失败: {e}")
-                    continue
+                    raise OCREngineError(f"保存切片失败: {str(e)}", e)
                 finally:
                     slice_img.close()
 
@@ -549,9 +539,8 @@ class OCREngine:
                         break
                     except Exception as e:
                         retry += 1
-                        logger.error(f"[OCR] 切片 {slice_index} 识别异常 (尝试 {retry}/{self.retry_count}): {e}")
                         if retry >= self.retry_count:
-                            break
+                            raise OCREngineError(f"切片 {slice_index} 识别异常: {str(e)}", e)
                         import time
                         time.sleep(0.3)
                 

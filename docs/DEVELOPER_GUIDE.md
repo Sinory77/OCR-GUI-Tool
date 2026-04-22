@@ -65,7 +65,7 @@ OCR-GUI-Tool/
 │   ├── __init__.py
 │   ├── config.py           # 配置管理
 │   ├── ocr_engine.py       # OCR 引擎封装
-│   ├── screenshot.py       # 截图功能
+│   ├── screenshot.py       # 截图功能（ScreenshotManager 和 HotkeyManager）
 │   ├── result_manager.py   # 结果与历史管理
 │   ├── exporter.py         # 导出功能
 │   ├── template_manager.py # 模板管理器

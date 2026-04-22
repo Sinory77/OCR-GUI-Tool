@@ -524,6 +524,42 @@ class ExportWorker(WorkerThread):
             self.error.emit(error_msg)
 
 
+class BatchExportWorker(WorkerThread):
+    """
+    批量导出工作线程
+    用于异步导出批量识别结果
+    """
+    
+    def __init__(self, exporter, format_type: str, output_path: str, parent=None):
+        super().__init__(parent)
+        self.exporter = exporter
+        self.format_type = format_type
+        self.output_path = output_path
+        self.task_name = "batch_export"
+    
+    def do_work(self):
+        """执行批量导出"""
+        try:
+            # 根据格式类型调用不同的导出方法
+            result_path = None
+            if self.format_type.upper() == "TXT":
+                result_path = self.exporter.export_txt(self.output_path)
+            elif self.format_type.upper() == "JSON":
+                result_path = self.exporter.export_json(self.output_path)
+            elif self.format_type.upper() == "EXCEL":
+                result_path = self.exporter.export_excel(self.output_path)
+            
+            self.finished.emit({
+                "success": result_path is not None,
+                "format_type": self.format_type,
+                "output_path": result_path if result_path else self.output_path
+            })
+        except Exception as e:
+            error_msg = f"批量导出异常: {str(e)}"
+            logger.error(f"[BatchExportWorker] {error_msg}", exc_info=True)
+            self.error.emit(error_msg)
+
+
 class AsyncTaskManager(QObject):
     """
     异步任务管理器 - 管理所有后台任务

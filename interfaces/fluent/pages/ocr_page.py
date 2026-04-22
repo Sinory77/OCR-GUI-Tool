@@ -25,6 +25,9 @@ from qfluentwidgets import (
 from qfluentwidgets.common.icon import FluentIcon
 from PySide6.QtGui import QPainter, QColor, QPen
 
+from core.error_handler import OCRError, ScreenshotError, ExportError, FileOperationError, handle_error, error_handling, ErrorType
+
+
 
 def _create_status_dot(color: str) -> 'QPixmap':
     """创建指定颜色的圆点图标"""
@@ -439,6 +442,9 @@ class OCRPage(QWidget):
         self.image_label.setVisible(True)
         self.file_list_widget.setVisible(False)
         self.batch_header.setVisible(False)
+        # 切换结果显示控件：单图模式使用文本框
+        self.result_table.setVisible(False)
+        self.result_text.setVisible(True)
         # 如果有批量文件列表，显示返回按钮
         self.btn_back_to_list.setVisible(bool(self.batch_file_paths))
         # 更新按钮文字
@@ -504,6 +510,18 @@ class OCRPage(QWidget):
         self.file_list_widget.setVisible(True)
         self.batch_header.setVisible(True)
         self.btn_back_to_list.setVisible(False)
+        # 快速切换到批量模式时显示表格
+        self.result_text.setVisible(False)
+        self.result_table.setVisible(True)
+        
+        # 恢复表格数据
+        if hasattr(self, 'batch_results') and self.batch_results:
+            self.result_table.setRowCount(0)
+            for item in self.batch_results:
+                self._add_result_to_table(item['file_name'], item['result'])
+            # 启用复制和导出
+            self.btn_copy.setEnabled(True)
+            self.btn_export.setEnabled(True)
         
         # 恢复选择状态
         if self.file_list_widget.count() > 0:
@@ -776,19 +794,11 @@ class OCRPage(QWidget):
         if file_paths:
             self._switch_to_batch_mode(file_paths)
     
+    @error_handling(ErrorType.FILE_OPERATION, "加载图片失败")
     def loadImage(self, file_path):
         """加载图片"""
         if not os.path.exists(file_path):
-            InfoBar.error(
-                title="错误",
-                content="图片文件不存在",
-                orient=Qt.Horizontal,
-                isClosable=True,
-                position=InfoBarPosition.TOP,
-                duration=3000,
-                parent=self
-            )
-            return
+            raise FileOperationError(f"图片文件不存在: {file_path}")
         
         self.current_image_path = file_path
         
@@ -799,16 +809,7 @@ class OCRPage(QWidget):
         # 显示图片预览
         pixmap = QPixmap(file_path)
         if pixmap.isNull():
-            InfoBar.error(
-                title="错误",
-                content="无法加载图片",
-                orient=Qt.Horizontal,
-                isClosable=True,
-                position=InfoBarPosition.TOP,
-                duration=3000,
-                parent=self
-            )
-            return
+            raise FileOperationError(f"无法加载图片: {file_path}")
         
         # 清除提示文字
         self.image_label.setText("")
@@ -853,47 +854,21 @@ class OCRPage(QWidget):
                     parent=self
                 )
     
+    @error_handling(ErrorType.OCR_ENGINE, "OCR 识别失败")
     def startOCR(self):
         """开始OCR识别（自动判断单图/批量）"""
         if not self.current_image_path:
-            InfoBar.warning(
-                title="提示",
-                content="请先选择或拖入图片",
-                orient=Qt.Horizontal,
-                isClosable=True,
-                position=InfoBarPosition.TOP,
-                duration=3000,
-                parent=self
-            )
-            return
+            raise OCRError("请先选择或拖入图片")
         
         # 检查 main_window
         if not hasattr(self, 'main_window') or not self.main_window:
-            InfoBar.error(
-                title="错误",
-                content="主窗口未初始化",
-                orient=Qt.Horizontal,
-                isClosable=True,
-                position=InfoBarPosition.TOP,
-                duration=3000,
-                parent=self
-            )
-            return
+            raise OCRError("主窗口未初始化")
         
         # 检查 OCR 引擎状态
         engine = self.main_window.ocr_engine
         if not engine._initialized:
             if not engine.initialize():
-                InfoBar.error(
-                    title="引擎初始化失败",
-                    content="OCR 引擎无法初始化，请检查配置",
-                    orient=Qt.Horizontal,
-                    isClosable=True,
-                    position=InfoBarPosition.TOP,
-                    duration=5000,
-                    parent=self
-                )
-                return
+                raise OCRError("OCR 引擎无法初始化，请检查配置")
             # 初始化成功，更新状态
             self.update_engine_status()
         
@@ -975,9 +950,15 @@ class OCRPage(QWidget):
         )
         
         # 连接信号
+        def on_batch_finished(result_data):
+            self.onBatchItemFinished(result_data)
+        
+        def on_batch_error(error_msg):
+            self._on_batch_error(error_msg)
+        
         self.batch_worker.progress.connect(self.onBatchProgress)
-        self.batch_worker.finished.connect(self.onBatchItemFinished)
-        self.batch_worker.error.connect(self._on_batch_error)
+        self.batch_worker.finished.connect(on_batch_finished)
+        self.batch_worker.error.connect(on_batch_error)
         
         # 启动线程
         self.batch_worker.start()
@@ -1257,11 +1238,21 @@ class OCRPage(QWidget):
                     parent=self
                 )
     
+    @error_handling(ErrorType.EXPORT, "导出结果失败")
     def exportResult(self, format_type):
         """导出结果 - 异步执行"""
-        if not self.ocr_result:
-            return
-        
+        # 检查是否有识别结果
+        if self.is_batch_mode and hasattr(self, 'batch_results') and self.batch_results:
+            # 批量模式导出
+            self._export_batch_results(format_type)
+        elif self.ocr_result:
+            # 单图模式导出
+            self._export_single_result(format_type)
+        else:
+            raise ExportError("没有识别结果可导出")
+    
+    def _export_single_result(self, format_type):
+        """导出单个识别结果"""
         # 获取文件名
         base_name = os.path.splitext(os.path.basename(self.current_image_path))[0]
         
@@ -1297,6 +1288,66 @@ class OCRPage(QWidget):
             self.export_worker = ExportWorker(
                 exporter=self.main_window.exporter,
                 results=self.ocr_result,
+                format_type=format_type,
+                output_path=file_path,
+                parent=self
+            )
+            
+            # 连接信号
+            self.export_worker.finished.connect(lambda r: self._on_export_finished(r))
+            self.export_worker.error.connect(self._on_export_error)
+            
+            # 启动线程
+            self.export_worker.start()
+    
+    def _export_batch_results(self, format_type):
+        """导出批量识别结果"""
+        # 获取文件夹名作为基础名称
+        if self.batch_file_paths:
+            folder = os.path.dirname(self.batch_file_paths[0])
+            base_name = os.path.basename(folder) or "批量识别"
+        else:
+            base_name = "批量识别"
+        
+        # 打开保存对话框
+        filters = {
+            "TXT": "文本文件 (*.txt)",
+            "JSON": "JSON文件 (*.json)",
+            "Excel": "Excel文件 (*.xlsx)"
+        }
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            f"导出批量结果为 {format_type}",
+            f"{base_name}_批量识别结果.{format_type.lower()}",
+            filters.get(format_type, "")
+        )
+        
+        if file_path:
+            # 显示导出中提示
+            InfoBar.info(
+                title="导出中",
+                content=f"正在导出批量结果为 {format_type} 格式...",
+                orient=Qt.Horizontal,
+                isClosable=False,
+                position=InfoBarPosition.TOP,
+                duration=-1,
+                parent=self
+            )
+            
+            # 准备导出数据
+            exporter = self.main_window.exporter
+            exporter.clear()
+            
+            # 添加所有批量结果
+            for item in self.batch_results:
+                exporter.add_result(item['file_path'], item['result'])
+            
+            # 使用异步工作线程执行导出
+            from core.async_worker import BatchExportWorker
+            
+            self.export_worker = BatchExportWorker(
+                exporter=exporter,
                 format_type=format_type,
                 output_path=file_path,
                 parent=self
@@ -1358,14 +1409,12 @@ class OCRPage(QWidget):
             parent=self
         )
     
+    @error_handling(ErrorType.SCREENSHOT, "截图失败")
     def screenshot(self):
         """截图识别"""
         # 先截取当前屏幕（主窗口还在，所以会包含主窗口内容）
-        try:
-            from core.screenshot import get_screenshot_manager
-            bg_path = get_screenshot_manager().capture_full_screen(save_to_history=False)
-        except:
-            bg_path = None
+        from core.screenshot import get_screenshot_manager
+        bg_path = get_screenshot_manager().capture_full_screen(save_to_history=False)
         
         # 隐藏主窗口
         self.main_window.hide()

@@ -7,7 +7,7 @@
   - [OCREngine](#ocrengine)
   - [ResultManager](#resultmanager)
   - [ResultExporter](#resultexporter)
-  - [Screenshot Functions](#screenshot-functions)
+  - [ScreenshotManager](#screenshotmanager)
 
 ---
 
@@ -311,35 +311,103 @@ exporter.export(result, "TXT", filename="single_result", output_dir="./output")
 
 ---
 
-### Screenshot Functions
+### ScreenshotManager
 
-截图功能函数。
+截图管理器，提供多种截图功能和快捷键管理。
 
-#### 核心函数
+#### 初始化
 
 ```python
-# 截取全屏到临时文件
-def capture_screen_to_temp() -> Optional[str]
+from core.screenshot import get_screenshot_manager
 
-# 截取全屏到 QPixmap（GUI 使用）
+manager = get_screenshot_manager()
+```
+
+#### 核心方法
+
+```python
+# 全屏截图
+def capture_full_screen(save_to_history: bool = True) -> Optional[str]
+
+# 区域截图
+def capture_screen_region(x: int, y: int, width: int, height: int, 
+                        save_to_history: bool = True) -> Optional[str]
+
+# 窗口截图
+def capture_window(hwnd: int) -> Optional[str]
+
+# 延迟截图
+def capture_with_delay(delay: int = 3) -> Optional[str]
+
+# 截图为 QPixmap（界面使用）
 def capture_screen_to_pixmap()
 
-# 截取全屏到字节数据
+# 截图为字节数据
 def capture_screen_as_bytes() -> Tuple[Optional[bytes], int, int]
 
-# 截取指定区域
-def capture_screen_region(x: int, y: int, width: int, height: int) -> Optional[str]
+# 保存到剪贴板
+def save_to_clipboard(image_path: str) -> bool
+
+# 历史记录管理
+def get_history() -> list
+def clear_history()
+```
+
+#### HotkeyManager
+
+```python
+# 初始化
+from core.screenshot import get_hotkey_manager
+
+hotkey_manager = get_hotkey_manager()
+
+# 注册快捷键
+hotkey_id = hotkey_manager.register("F1", callback_function)
+
+# 开始监听
+hotkey_manager.start_listening()
+
+# 停止监听
+hotkey_manager.stop_listening()
+
+# 注销快捷键
+hotkey_manager.unregister(hotkey_id)
 ```
 
 #### 使用示例
 
 ```python
-from core.screenshot import capture_screen_to_temp
+from core.screenshot import get_screenshot_manager, get_hotkey_manager
+
+# 截图管理
+manager = get_screenshot_manager()
 
 # 截取全屏
-temp_path = capture_screen_to_temp()
+temp_path = manager.capture_full_screen()
 if temp_path:
-    print(f"截图已保存: {temp_path}")
+    print(f"全屏截图已保存: {temp_path}")
+
+# 截取指定区域
+region_path = manager.capture_screen_region(100, 100, 800, 600)
+
+# 延迟截图
+delayed_path = manager.capture_with_delay(5)  # 5秒后截图
+
+# 保存到剪贴板
+manager.save_to_clipboard(temp_path)
+
+# 快捷键管理
+hotkey_manager = get_hotkey_manager()
+
+def on_screenshot():
+    print("快捷键触发截图")
+    manager.capture_full_screen()
+
+# 注册快捷键
+hotkey_id = hotkey_manager.register("F1", on_screenshot)
+
+# 开始监听
+hotkey_manager.start_listening()
 ```
 
 ---
@@ -353,12 +421,15 @@ from core.config import get_config_manager
 from core.ocr_engine import get_ocr_engine, reset_ocr_engine
 from core.result_manager import get_result_manager
 from core.exporter import get_exporter, reset_exporter
+from core.screenshot import get_screenshot_manager, get_hotkey_manager
 
 # 获取单例
 config = get_config_manager()
 engine = get_ocr_engine()
 manager = get_result_manager()
 exporter = get_exporter()
+screenshot_manager = get_screenshot_manager()
+hotkey_manager = get_hotkey_manager()
 
 # 重置实例（用于重新配置）
 reset_ocr_engine(exe_path=new_path, language="English")

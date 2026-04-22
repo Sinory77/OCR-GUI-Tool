@@ -10,6 +10,11 @@ from typing import Any, Dict, Optional
 # 配置日志
 logger = logging.getLogger(__name__)
 
+# 导入错误处理模块
+from .error_handler import ConfigError, handle_error, error_handling, ErrorType
+
+
+
 # 项目根目录
 ROOT_DIR = Path(__file__).parent.parent.resolve()
 
@@ -54,7 +59,17 @@ CONFIG_FILE = ROOT_DIR / "config.json"
 
 
 class ConfigManager:
-    """配置管理器 - 核心层配置持久化"""
+    """配置管理器 - 核心层配置持久化
+    
+    该类负责：
+    1. 加载和保存配置文件
+    2. 提供配置的获取和设置方法
+    3. 验证配置值的有效性
+    4. 管理 OCR 引擎路径和模型路径
+    5. 支持自动检测 OCR 相关路径
+    
+    使用单例模式确保全局只有一个配置管理器实例
+    """
 
     _instance: Optional['ConfigManager'] = None
 
@@ -71,6 +86,7 @@ class ConfigManager:
         self._config_file = CONFIG_FILE
         self._data = self._load()
 
+    @error_handling(ErrorType.CONFIG, "加载配置文件失败")
     def _load(self) -> Dict[str, Any]:
         """加载配置文件
         
@@ -84,9 +100,9 @@ class ConfigManager:
                     logger.info(f"成功加载配置文件: {self._config_file}")
                     return config
             except json.JSONDecodeError as e:
-                logger.error(f"配置文件格式错误: {e}")
+                raise ConfigError(f"配置文件格式错误: {str(e)}", e)
             except Exception as e:
-                logger.error(f"加载配置文件失败: {e}")
+                raise ConfigError(f"加载配置文件失败: {str(e)}", e)
         return self._get_defaults()
 
     def _get_defaults(self) -> Dict[str, Any]:
@@ -112,6 +128,7 @@ class ConfigManager:
             "history_display_limit": 50,   # 历史记录显示上限
         }
 
+    @error_handling(ErrorType.CONFIG, "保存配置文件失败")
     def save(self) -> bool:
         """保存配置到文件
         
@@ -141,8 +158,7 @@ class ConfigManager:
             logger.info("配置已保存")
             return True
         except Exception as e:
-            logger.error(f"保存配置失败: {e}")
-            return False
+            raise ConfigError(f"保存配置失败: {str(e)}", e)
 
     def get(self, key: str, default: Any = None) -> Any:
         """获取配置值

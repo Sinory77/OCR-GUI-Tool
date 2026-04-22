@@ -20,6 +20,8 @@ from .pages.history_page import HistoryPage
 from .pages.template_page import TemplatePage
 from .pages.settings_page import SettingsPage
 from .ui_utils import create_engine_config_dialog
+from .error_ui import ErrorHandlerUI
+from core.error_handler import get_error_handler, ErrorType, OCRError
 
 
 class MainWindow(FluentWindow):
@@ -36,6 +38,9 @@ class MainWindow(FluentWindow):
         
         # 初始化界面
         self.initNavigation()
+        
+        # 初始化错误处理
+        self.initErrorHandling()
         
         # 加载翻译
         self.loadTranslator()
@@ -81,6 +86,23 @@ class MainWindow(FluentWindow):
     def setupTranslation(self, translator):
         """设置翻译"""
         self.translator = translator
+    
+    def initErrorHandling(self):
+        """初始化错误处理"""
+        # 创建界面错误处理器
+        self.error_ui = ErrorHandlerUI(self)
+        
+        # 获取全局错误处理器
+        error_handler = get_error_handler()
+        
+        # 注册错误处理回调
+        for error_type in ErrorType:
+            error_handler.register_callback(error_type, self._handle_error)
+    
+    def _handle_error(self, error: OCRError):
+        """处理错误的回调函数"""
+        # 显示错误信息
+        self.error_ui.handle_ocr_error(error)
     
     def initNavigation(self):
         """初始化导航"""

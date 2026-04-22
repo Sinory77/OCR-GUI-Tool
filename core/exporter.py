@@ -13,9 +13,18 @@ logger = logging.getLogger(__name__)
 
 
 class ResultExporter:
-    """识别结果导出器"""
+    """识别结果导出器
+    
+    该类负责：
+    1. 管理待导出的 OCR 识别结果
+    2. 支持导出为 TXT、JSON、Excel 格式
+    3. 提供单个结果和批量结果的导出功能
+    4. 处理导出过程中的异常
+    5. 提供结果的合并和格式化
+    """
     
     def __init__(self):
+        """初始化导出器"""
         self.results: List[Dict[str, Any]] = []
         self.image_paths: List[str] = []
     

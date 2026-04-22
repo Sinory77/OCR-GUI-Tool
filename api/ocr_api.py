@@ -1,10 +1,9 @@
-# OcrApi - 提供给前端 Web 界面的 API
+# OcrApi - 提供给前端的 API
 import os
 import sys
 import json
 import threading
 import tempfile
-import webview
 
 from datetime import datetime
 
@@ -29,8 +28,6 @@ class OcrApi:
             'det_threshold': 0.3
         }
         self.current_result = None
-        self._is_maximized = False
-        self._window = None   # 由 app.py 注入，供回调使用
         
         # 加载历史
         self.load_history()
@@ -63,7 +60,7 @@ class OcrApi:
                 models_path = DEFAULT_MODELS_PATH
                 
                 # 直接创建 OCREngine 实例（get_ocr_engine 无参数版本）
-                from ocr_tool.ocr_engine import OCREngine
+                from core.ocr_engine import OCREngine
                 self.ocr_engine = OCREngine(exe_path=exe_path, models_path=models_path)
                 ok = self.ocr_engine.initialize()
                 if ok:
@@ -80,16 +77,10 @@ class OcrApi:
     def _init_async(self, init_fn):
         """异步初始化"""
         import time
-        time.sleep(0.5)  # 等待前端准备好
+        time.sleep(0.5)  # 等待初始化完成
         result = init_fn()
-        # 通过JS回调更新状态
-        win = self._window or (webview.windows[0] if webview.windows else None)
-        if win:
-            try:
-                is_err = 'error' in result and result['error']
-                win.evaluate_js(f"updateEngineStatus('{result['status']}', {str(bool(is_err)).lower()})")
-            except Exception:
-                pass
+        # 直接返回结果，不再通过JS回调更新状态
+        return result
     
     def get_settings(self):
         """获取设置"""
@@ -195,13 +186,6 @@ class OcrApi:
         try:
             from PIL import ImageGrab
             
-            # 获取窗口对象
-            win = self._window or (webview.windows[0] if webview.windows else None)
-            
-            # 先最小化窗口
-            if win:
-                win.hide()
-            
             import time
             time.sleep(0.5)
             
@@ -212,18 +196,8 @@ class OcrApi:
             temp_file = os.path.join(tempfile.gettempdir(), 'ocr_screenshot.png')
             img.save(temp_file)
             
-            # 恢复窗口
-            if win:
-                win.show()
-            
             return {'path': temp_file}
         except Exception as e:
-            win = self._window or (webview.windows[0] if webview.windows else None)
-            if win:
-                try:
-                    win.show()
-                except Exception:
-                    pass
             return {'error': str(e)}
     
     def batch_select(self):
@@ -323,4 +297,3 @@ class OcrApi:
     def _get_time(self):
         """获取当前时间"""
         return datetime.now().strftime('%Y-%m-%d %H:%M')
-

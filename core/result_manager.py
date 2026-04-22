@@ -12,9 +12,24 @@ from .config import HISTORY_FILE
 # 配置日志
 logger = logging.getLogger(__name__)
 
+# 导入错误处理模块
+from .error_handler import FileOperationError, handle_error, error_handling, ErrorType
+
+
+
 
 class ResultManager:
-    """识别结果和历史记录管理器"""
+    """识别结果和历史记录管理器
+    
+    该类负责：
+    1. 管理 OCR 识别结果
+    2. 维护识别历史记录
+    3. 提供结果的格式化和查询
+    4. 支持历史记录的增删改查
+    5. 管理历史记录的存储和加载
+    
+    使用线程安全的方式确保全局只有一个结果管理器实例
+    """
     
     def __init__(self, history_file=None):
         """
@@ -34,6 +49,7 @@ class ResultManager:
         # 加载历史记录
         self.load_history()
     
+    @error_handling(ErrorType.FILE_OPERATION, "加载历史记录失败")
     def load_history(self) -> bool:
         """加载历史记录
         
@@ -47,17 +63,16 @@ class ResultManager:
                 logger.info(f"已加载 {len(self.history)} 条历史记录")
                 return True
             except json.JSONDecodeError as e:
-                logger.error(f"历史记录文件格式错误: {e}")
-                self.history = []
+                raise FileOperationError(f"历史记录文件格式错误: {str(e)}", e)
             except Exception as e:
-                logger.error(f"加载历史记录失败: {e}", exc_info=True)
-                self.history = []
+                raise FileOperationError(f"加载历史记录失败: {str(e)}", e)
         else:
             logger.debug("历史记录文件不存在，创建新记录")
             self.history = []
         
         return False
     
+    @error_handling(ErrorType.FILE_OPERATION, "保存历史记录失败")
     def save_history(self) -> bool:
         """保存历史记录到文件
         
@@ -73,8 +88,7 @@ class ResultManager:
             logger.debug(f"已保存 {len(self.history)} 条历史记录")
             return True
         except Exception as e:
-            logger.error(f"保存历史记录失败: {e}", exc_info=True)
-            return False
+            raise FileOperationError(f"保存历史记录失败: {str(e)}", e)
     
     def add_result(self, image_path: str, ocr_result: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -181,7 +195,6 @@ class ResultManager:
         self.history = []
         self.save_history()
         logger.info(f"已清空 {count} 条历史记录")
-        return True
         return True
     
     def get_result(self, image_path):

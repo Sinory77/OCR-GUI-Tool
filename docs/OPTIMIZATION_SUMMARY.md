@@ -6,35 +6,56 @@
 
 ---
 
-## 一、核心代码优化
+## 一、项目清理 (v2.1.0)
 
-### 1.1 修复硬编码路径
+### 1.1 清理测试/调试文件
+
+**删除的临时文件**（共 38 个）：
+
+| 类型 | 文件数量 | 示例 |
+|------|----------|------|
+| test_*.py | 23 | test_ocr_page_*.py, test_main_window_*.py |
+| *_test.py | 6 | test_api_core_api*.py, test_core_error_handler*.py |
+| *_debug.py | 3 | run_debug.py, test_main_window_debug.py |
+| 其他脚本 | 6 | clean_test.py, demo_api_architecture.py 等 |
+
+**影响**：
+- ✅ 项目结构更清晰
+- ✅ 减少维护负担
+- ✅ 提高代码库可读性
+
+### 1.2 新增核心模块
+
+| 模块 | 说明 |
+|------|------|
+| `core/deduplication.py` | 识别结果去重功能 |
+| `core/enhanced_error_handler.py` | 增强错误处理机制 |
+| `interfaces/fluent/ui_config.py` | UI 配置管理 |
+
+---
+
+## 二、核心代码优化
+
+### 2.1 修复硬编码路径
 
 **问题**: `config.py` 中使用绝对路径，不利于项目移植
 
 **改进**:
 ```python
-# 改进前
-DEFAULT_OCR_EXE = r"C:\Users\Sinory\Desktop\...\PaddleOCR-json.exe"
-
 # 改进后
 DEFAULT_OCR_EXE = str(ROOT_DIR / "PaddleOCR-json" / "PaddleOCR-json.exe")
 ```
 
-**影响**: 
+**影响**:
 - ✅ 提高项目可移植性
 - ✅ 支持不同开发环境
 - ✅ 便于团队协作
 
-### 1.2 添加类型注解
+### 2.2 添加类型注解
 
 **改进**: 为所有核心模块添加完整的类型注解
 
 ```python
-# 改进前
-def get_config_value(key, default=None):
-    return self._data.get(key, default)
-
 # 改进后
 def get_config_value(self, key: str, default: Any = None) -> Any:
     return self._data.get(key, default)
@@ -45,126 +66,99 @@ def get_config_value(self, key: str, default: Any = None) -> Any:
 - ✅ IDE 更好的智能提示
 - ✅ 减少类型相关 bug
 
-### 1.3 改进错误处理
+### 2.3 改进错误处理
 
 **改进**: 使用 logging 替代 print，添加详细的异常处理
 
 ```python
-# 改进前
-print(f"加载失败: {e}")
-
 # 改进后
 logger.error(f"加载配置文件失败: {e}", exc_info=True)
 ```
 
-**影响**:
-- ✅ 更专业的日志管理
-- ✅ 包含完整堆栈信息
-- ✅ 可配置日志级别
+---
 
-### 1.4 优化全局变量管理
+## 三、API 服务端架构
 
-**改进**: 使用线程安全的双重检查锁定模式
+### 3.1 新增 api_server 模块
 
-```python
-_ocr_engine: Optional[OCREngine] = None
-_engine_lock = None
-
-def get_ocr_engine() -> OCREngine:
-    global _ocr_engine
-    
-    if _ocr_engine is None:
-        with _get_lock():
-            if _ocr_engine is None:
-                _ocr_engine = OCREngine()
-    
-    return _ocr_engine
+```
+api_server/
+├── main.py              # FastAPI 主应用
+├── adapter.py           # API 适配器
+├── client.py            # API 客户端
+├── routes/              # 路由层
+│   ├── ocr_routes.py
+│   └── task_routes.py
+├── services/            # 业务服务层
+│   └── ocr_service.py
+├── tasks/               # 异步任务管理层
+│   └── task_manager.py
+└── utils/               # 工具公共层
+    ├── exceptions.py
+    └── response.py
 ```
 
-**影响**:
-- ✅ 线程安全
-- ✅ 避免竞态条件
-- ✅ 提高并发性能
+### 3.2 核心接口
 
-### 1.5 增强资源管理
+| 接口 | 说明 |
+|------|------|
+| `POST /ocr/recognize/single` | 同步识别单张图片 |
+| `POST /ocr/recognize/single_async` | 异步识别单张图片 |
+| `POST /ocr/recognize/batch` | 同步批量识别 |
+| `POST /ocr/recognize/batch_async` | 异步批量识别 |
+| `GET /task/{task_id}` | 查询任务状态 |
 
-**改进**: 确保临时文件和进程被正确清理
+### 3.3 特性
 
-```python
-try:
-    # 执行操作
-    result = process_image()
-finally:
-    # 确保清理
-    img.close()
-    for f in tmp_files:
-        try:
-            os.remove(f)
-        except Exception as e:
-            logger.warning(f"删除临时文件失败: {e}")
-```
-
-**影响**:
-- ✅ 防止内存泄漏
-- ✅ 防止磁盘空间浪费
-- ✅ 提高系统稳定性
-
-### 1.6 添加输入验证
-
-**改进**: 对所有配置值和输入参数进行验证
-
-```python
-def set_confidence_threshold(self, threshold: int) -> bool:
-    if not isinstance(threshold, (int, float)) or not (0 <= threshold <= 100):
-        logger.error(f"无效的置信度阈值: {threshold}")
-        return False
-    return self.set("confidence_threshold", int(threshold))
-```
-
-**影响**:
-- ✅ 防止无效输入
-- ✅ 提前发现错误
-- ✅ 提高系统健壮性
-
-### 1.7 截图功能优化
-
-**改进**: 重构截图功能，创建 ScreenshotManager 和 HotkeyManager 类
-
-**核心功能**:
-- 支持多种截图方式（mss、PIL、Win32 API）
-- 提供全屏、区域、窗口截图
-- 支持延迟截图和历史记录
-- 实现全局快捷键管理
-- 跨平台兼容性检查
-
-**影响**:
-- ✅ 提高截图成功率
-- ✅ 支持更多截图场景
-- ✅ 快捷键功能增强用户体验
-- ✅ 统一的截图管理接口
+- ✅ 分层解耦：UI 界面层与业务逻辑完全分离
+- ✅ 异步任务：所有计算在后台线程执行
+- ✅ 统一 API：标准化的任务提交和查询接口
+- ✅ 线程安全：内置任务管理器确保线程安全
+- ✅ 错误处理：全局异常捕获和处理
 
 ---
 
-## 二、单元测试
+## 四、界面优化
 
-### 2.1 测试覆盖
+### 4.1 工具栏布局优化
 
-创建了三个核心测试文件：
+**改进**: 使用两行 QVBoxLayout 代替 FlowLayout
 
-| 文件 | 测试内容 | 用例数 |
-|------|---------|--------|
-| `test_config.py` | 配置管理器 | 12+ |
-| `test_result_manager.py` | 结果管理器 | 15+ |
-| `test_exporter.py` | 导出器 | 15+ |
+```python
+# 第一行：操作按钮
+# 返回列表 | 选择图片 | 批量选择 | 截图识别 | 开始识别 | 中断
 
-### 2.2 测试特性
+# 第二行：参数选项
+# 识别语言: [下拉框]    提取模板: [下拉框]
+```
 
-- ✅ 使用 pytest 框架
-- ✅ Fixture 管理测试数据
-- ✅ Mock 外部依赖
-- ✅ 覆盖率报告支持
+**影响**:
+- ✅ 解决按钮错位问题
+- ✅ 标签与下拉框始终对齐
+- ✅ 界面更整洁专业
 
-### 2.3 运行测试
+### 4.2 新增 UI 组件
+
+| 组件 | 说明 |
+|------|------|
+| `error_ui.py` | 统一的错误展示界面 |
+| `ui_config.py` | UI 配置管理 |
+
+---
+
+## 五、单元测试
+
+### 5.1 测试覆盖
+
+| 文件 | 测试内容 |
+|------|----------|
+| `test_config.py` | 配置管理器 |
+| `test_result_manager.py` | 结果管理器 |
+| `test_exporter.py` | 导出器 |
+| `test_error_handler.py` | 错误处理 |
+| `test_error_ui.py` | 错误界面 |
+
+### 5.2 运行测试
 
 ```bash
 # 安装测试依赖
@@ -179,183 +173,54 @@ pytest tests/ --cov=core --cov-report=html
 
 ---
 
-## 三、CI/CD 配置
+## 六、文档完善
 
-### 3.1 持续集成 (ci.yml)
+### 6.1 文档清单
 
-**触发条件**: 
-- Push 到 main/master 分支
-- 创建 Pull Request
-
-**执行步骤**:
-1. 多 Python 版本测试 (3.10, 3.11, 3.12)
-2. 代码风格检查 (flake8)
-3. 代码格式检查 (black)
-4. 运行单元测试 (pytest)
-5. 上传覆盖率报告 (Codecov)
-6. 类型检查 (mypy)
-
-### 3.2 自动发布 (release.yml)
-
-**触发条件**: 创建 GitHub Release
-
-**执行步骤**:
-1. 构建可执行文件 (PyInstaller)
-2. 自动上传到 Release
-
-### 3.3 使用方法
-
-1. 将代码推送到 GitHub
-2. Actions 会自动运行
-3. 在 Actions 标签页查看结果
-
----
-
-## 四、文档完善
-
-### 4.1 API 参考文档 (`API_REFERENCE.md`)
-
-**内容**:
-- 所有核心类的详细说明
-- 方法签名和参数说明
-- 返回值格式
-- 使用示例
-- 状态码说明
-
-**适用人群**: 
-- 开发者
-- API 使用者
-
-### 4.2 开发者指南 (`DEVELOPER_GUIDE.md`)
-
-**内容**:
-- 开发环境设置
-- 项目结构说明
-- 代码规范
-- 测试指南
-- 贡献流程
-- 常见问题
-
-**适用人群**:
-- 新加入的开发者
-- 贡献者
-
-### 4.3 性能监控文档 (`PERFORMANCE_MONITORING.md`)
-
-**内容**:
-- 快速开始
-- API 参考
-- 集成示例
-- 最佳实践
-- 故障排查
-
-**适用人群**:
-- 性能优化人员
-- 运维人员
-
----
-
-## 五、性能监控
-
-### 5.1 新增模块 (`performance_monitor.py`)
-
-**核心功能**:
-- 操作计时
-- 统计分析
-- 报告生成
-- 上下文管理器支持
-
-### 5.2 已集成位置
-
-- ✅ OCR 识别操作 (`ocr_recognize`)
-- ✅ 可扩展到其他操作
-
-### 5.3 使用示例
-
-```python
-from core.performance_monitor import get_performance_monitor
-
-monitor = get_performance_monitor()
-
-# 查看统计
-stats = monitor.get_stats()
-print(f"平均耗时: {stats['avg_duration']:.3f}s")
-print(f"成功率: {stats['success_rate']:.1f}%")
-
-# 导出报告
-report = monitor.export_report()
-with open("performance.txt", "w") as f:
-    f.write(report)
-```
-
----
-
-## 六、改进效果对比
-
-### 6.1 代码质量
-
-| 指标 | 改进前 | 改进后 | 提升 |
-|------|--------|--------|------|
-| 类型注解覆盖率 | ~20% | ~95% | +75% |
-| 文档字符串覆盖率 | ~30% | ~90% | +60% |
-| 异常处理完善度 | ~50% | ~95% | +45% |
-| 代码复用率 | ~40% | ~75% | +35% |
-
-### 6.2 可维护性
-
-| 方面 | 改进 |
+| 文件 | 内容 |
 |------|------|
-| 路径配置 | 相对路径，易于移植 |
-| 全局状态 | 线程安全，避免竞态 |
-| 资源管理 | 自动清理，防止泄漏 |
-| 错误追踪 | 详细日志，快速定位 |
-
-### 6.3 测试覆盖
-
-| 模块 | 测试用例数 | 目标覆盖率 |
-|------|-----------|-----------|
-| ConfigManager | 12+ | 90%+ |
-| ResultManager | 15+ | 85%+ |
-| ResultExporter | 15+ | 80%+ |
+| `README.md` | 项目使用说明 |
+| `PROJECT_STRUCTURE.md` | 项目结构说明 |
+| `API_SERVER_DOCUMENTATION.md` | API 服务端文档 |
+| `docs/API_REFERENCE.md` | API 参考 |
+| `docs/DEVELOPER_GUIDE.md` | 开发者指南 |
+| `docs/OPTIMIZATION_SUMMARY.md` | 优化总结 |
+| `docs/PERFORMANCE_MONITORING.md` | 性能监控 |
+| `docs/interrupt_mechanism.md` | 中断机制 |
 
 ---
 
 ## 七、文件清单
 
-### 新增文件
+### 当前项目结构
 
 ```
 OCR-GUI-Tool/
-├── tests/
-│   ├── __init__.py
-│   ├── test_config.py
-│   ├── test_result_manager.py
-│   └── test_exporter.py
-├── docs/
-│   ├── API_REFERENCE.md
-│   ├── DEVELOPER_GUIDE.md
-│   ├── PERFORMANCE_MONITORING.md
-│   └── OPTIMIZATION_SUMMARY.md
-├── .github/workflows/
-│   ├── ci.yml
-│   └── release.yml
-├── core/
-│   └── performance_monitor.py
-├── pytest.ini
+├── api/                           # API 接口层 (4 文件)
+├── api_server/                    # API 服务端 (9 文件)
+├── core/                          # 核心模块 (12 文件)
+├── interfaces/fluent/             # 界面层 (11 文件)
+├── tests/                         # 测试 (8 文件)
+├── templates/                     # 模板 (4 文件)
+├── config/                        # 配置 (2 文件)
+├── docs/                          # 文档 (5 文件)
+├── main.py
+├── run.py
+├── requirements.txt
 ├── requirements-dev.txt
-└── OPTIMIZATION_SUMMARY.md (本文件)
+├── pytest.ini
+└── README.md
 ```
 
-### 修改文件
+### 对比统计
 
-```
-core/
-├── config.py          # 路径、类型注解、验证
-├── ocr_engine.py      # 日志、资源管理、性能监控
-├── result_manager.py  # 线程安全、日志
-├── exporter.py        # 类型注解、异常处理
-└── screenshot.py      # 平台检测、日志
-```
+| 类别 | v2.0.0 | v2.1.0 | 变化 |
+|------|--------|--------|------|
+| Python 文件 | ~55 | ~44 | -11 |
+| 测试文件 | ~25 | 6 | -19 |
+| 临时脚本 | ~15 | 0 | -15 |
+| 核心模块 | 9 | 11 | +2 |
+| API 服务端 | 0 | 9 | +9 |
 
 ---
 
@@ -363,13 +228,13 @@ core/
 
 ### 短期（1-2周）
 
-1. **补充测试**: 为 `template_manager.py` 和 `text_parser.py` 添加测试
-2. **性能基准**: 建立性能基准，监控回归
-3. **文档完善**: 补充界面层文档
+1. **补充测试**: 为 `deduplication.py` 和 `enhanced_error_handler.py` 添加测试
+2. **API 文档**: 完善 API 服务端 Swagger 文档
+3. **界面优化**: 继续完善 UI 细节
 
 ### 中期（1-2月）
 
-1. **增加监控**: 为更多操作添加性能监控
+1. **性能基准**: 建立性能基准，监控回归
 2. **自动化部署**: 配置 PyPI 发布
 3. **用户手册**: 编写面向最终用户的文档
 
@@ -383,13 +248,13 @@ core/
 
 ## 九、总结
 
-本次优化从以下五个方面全面提升了项目质量：
+本次优化从以下几个方面全面提升了项目质量：
 
-1. **代码质量**: 类型注解、文档字符串、错误处理
-2. **可维护性**: 线程安全、资源管理、输入验证
-3. **测试覆盖**: 单元测试、CI/CD、覆盖率报告
-4. **文档完善**: API 参考、开发者指南、性能监控
-5. **性能监控**: 实时监控、统计分析、报告生成
+1. **代码质量**: 清理临时文件，优化核心模块
+2. **架构完善**: 新增 API 服务端架构，支持远程调用
+3. **界面优化**: 工具栏布局改进，新增 UI 组件
+4. **可维护性**: 线程安全、资源管理、输入验证
+5. **文档完善**: 更新所有文档，保持与代码同步
 
 这些改进将使项目更加健壮、易维护，并为未来的功能扩展打下坚实基础。
 
@@ -400,5 +265,5 @@ core/
 感谢所有为这个项目做出贡献的开发者！
 
 如有问题或建议，请通过以下方式联系：
-- GitHub Issues
-- GitHub Discussions
+- GitHub Issues: https://github.com/Sinory77/OCR-GUI-Tool/issues
+- GitHub Discussions: https://github.com/Sinory77/OCR-GUI-Tool/discussions

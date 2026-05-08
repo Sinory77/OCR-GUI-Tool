@@ -1,8 +1,8 @@
 # OCR GUI Tool - 项目结构说明
 
-> **版本**: v2.0.0  
-> **最后更新**: 2026-04-16  
-> **技术栈**: Python 3.10+ | PySide6 | qfluentwidgets | PaddleOCR-json
+> **版本**: v2.1.0
+> **最后更新**: 2026-05-08
+> **技术栈**: Python 3.10+ | PySide6 | qfluentwidgets | PaddleOCR-json | FastAPI
 
 ---
 
@@ -11,74 +11,106 @@
 ```
 OCR-GUI-Tool/
 │
-├── 📄 main.py                          # 主入口（启动 Fluent 界面）
-├── 📄 run.py                           # 快速测试入口（推荐 IDE 调试）
-├── 📄 requirements.txt                 # Python 依赖清单
-├── 📄 config.json                      # 用户配置文件（运行时生成）
-├── 📄 history.json                     # 识别历史记录（运行时生成）
-├── 📄 README.md                        # 项目使用说明
-├── 📄 PROJECT_STRUCTURE.md             # 本文件 - 项目结构说明
+├── 📄 main.py                           # 主入口（启动 Fluent 界面）
+├── 📄 run.py                            # 快速测试入口（推荐 IDE 调试）
+├── 📄 requirements.txt                   # Python 依赖清单
+├── 📄 requirements-dev.txt               # 开发依赖
+├── 📄 pytest.ini                        # pytest 配置
+├── 📄 README.md                         # 项目使用说明
+├── 📄 PROJECT_STRUCTURE.md              # 本文件 - 项目结构说明
 │
-├── 🔧 core/                            # 核心业务逻辑层
-│   ├── __init__.py                     # 模块初始化与导出
-│   ├── config.py                       # 配置管理器（读写 config.json）
-│   ├── ocr_engine.py                   # OCR 引擎封装（进程管理、通讯协议）
-│   ├── result_manager.py               # 识别结果管理器
-│   ├── exporter.py                     # 结果导出器（TXT/Excel）
-│   ├── template_manager.py             # 模板管理器（解析规则 CRUD）
-│   ├── text_parser.py                  # 文本解析器（基于模板提取字段）
-│   ├── screenshot.py                   # 截图功能（Windows API 调用）
-│   ├── async_worker.py                 # 异步工作线程（非阻塞 UI）
-│   └── performance_monitor.py          # 性能监控（耗时统计、资源使用）
+├── 🔧 core/                             # 核心业务逻辑层
+│   ├── __init__.py
+│   ├── config.py                        # 配置管理器
+│   ├── ocr_engine.py                    # OCR 引擎封装
+│   ├── result_manager.py                # 识别结果管理器
+│   ├── exporter.py                      # 结果导出器（TXT/Excel）
+│   ├── template_manager.py              # 模板管理器
+│   ├── text_parser.py                   # 文本解析器
+│   ├── screenshot.py                     # 截图功能
+│   ├── async_worker.py                  # 异步工作线程
+│   ├── deduplication.py                 # 去重功能
+│   ├── error_handler.py                 # 错误处理
+│   └── enhanced_error_handler.py        # 增强错误处理
 │
-├── 🎨 interfaces/                      # 界面层
-│   ├── __init__.py                     # 包初始化
+├── 🎨 interfaces/                        # 界面层
+│   ├── __init__.py
 │   │
-│   └── fluent/                         # ⭐ Fluent Design 界面（唯一保留的 UI）
-│       ├── __init__.py                 # 包初始化
-│       ├── main_window.py              # 主窗口（导航栏 + 页面切换）
+│   └── fluent/                          # ⭐ Fluent Design 界面
+│       ├── __init__.py
+│       ├── main_window.py               # 主窗口（导航栏 + 页面切换）
+│       ├── ui_utils.py                   # 界面工具函数
+│       ├── ui_config.py                  # UI 配置管理
+│       ├── error_ui.py                   # 错误界面组件
 │       │
-│       ├── components/                 # 可复用组件
-│       │   └── screenshot_window.py    # 截图窗口（十字光标、区域选择）
+│       ├── components/                   # 可复用组件
+│       │   └── screenshot_window.py     # 截图窗口
 │       │
-│       └── pages/                      # 页面组件
-│           ├── __init__.py             # 包初始化
-│           ├── ocr_page.py             # OCR 识别页面（截图、拖拽、批量处理）
-│           ├── history_page.py         # 历史记录页面（列表展示、搜索、删除）
-│           ├── template_page.py        # 模板管理页面（规则编辑、预览测试）
-│           └── settings_page.py        # 设置页面（引擎配置、语言、快捷键）
+│       └── pages/                       # 页面组件
+│           ├── __init__.py
+│           ├── ocr_page.py              # OCR 识别页面
+│           ├── history_page.py          # 历史记录页面
+│           ├── template_page.py         # 模板管理页面
+│           └── settings_page.py         # 设置页面
 │
-├── 🔌 api/                             # API 接口层（预留扩展）
-│   ├── __init__.py                     # 包初始化
-│   ├── ocr_api.py                      # OCR API 封装
-│   └── PPOCR_api.py                    # PaddleOCR API 兼容层
+├── 🔌 api/                              # API 接口层
+│   ├── __init__.py
+│   ├── PPOCR_api.py                     # PaddleOCR API 封装
+│   ├── core_api.py                      # 核心 API
+│   └── ocr_api.py                       # OCR 接口
 │
-├── 🧪 tests/                           # 单元测试
-│   ├── __init__.py                     # 包初始化
+├── 🖥️ api_server/                       # API 服务端（可选）
+│   ├── __init__.py
+│   ├── main.py                          # FastAPI 主应用
+│   ├── adapter.py                       # API 适配器
+│   ├── client.py                        # API 客户端
+│   │
+│   ├── routes/                          # 路由层
+│   │   ├── __init__.py
+│   │   ├── ocr_routes.py               # OCR 相关路由
+│   │   └── task_routes.py              # 任务相关路由
+│   │
+│   ├── services/                        # 业务服务层
+│   │   └── ocr_service.py
+│   │
+│   ├── tasks/                           # 异步任务管理层
+│   │   └── task_manager.py
+│   │
+│   └── utils/                           # 工具公共层
+│       ├── exceptions.py
+│       └── response.py
+│
+├── 🧪 tests/                            # 单元测试
+│   ├── __init__.py
 │   ├── test_config.py                  # 配置管理测试
 │   ├── test_result_manager.py          # 结果管理测试
-│   ├── test_exporter.py                # 导出功能测试
+│   ├── test_exporter.py                 # 导出功能测试
+│   ├── test_error_handler.py           # 错误处理测试
+│   ├── test_error_ui.py                # 错误界面测试
 │   ├── test_data_baohuodan.txt         # 测试数据：报货单样本
 │   └── test_data_jianyi.txt            # 测试数据：简易样本
 │
-├── 📦 PaddleOCR-json/                  # OCR 引擎（外部依赖，不纳入 Git）
-│   ├── PaddleOCR-json.exe              # OCR 主程序
-│   ├── *.dll                           # 动态链接库
-│   └── models/                         # OCR 模型文件
-│       ├── config_chinese.txt          # 简体中文配置
-│       ├── config_chinese_cht.txt      # 繁体中文配置
-│       ├── config_en.txt               # 英文配置
-│       ├── config_japan.txt            # 日文配置
-│       ├── config_korean.txt           # 韩文配置
-│       ├── config_cyrillic.txt         # 俄文配置
-│       └── *_infer/                    # 预训练模型目录
+├── 📦 PaddleOCR-json/                   # OCR 引擎（外部依赖）
+│   ├── PaddleOCR-json.exe
+│   ├── *.dll
+│   └── models/                          # OCR 模型文件
 │
-├── 📝 templates/                       # ⭐ 解析模板存储目录（TemplateManager 默认路径）
-│   ├── animal_quarantine.json          # 动物检疫证明模板（13个规则）
-│   ├── baohuodan.json                  # 报货单模板（7个规则）
-│   └── jianyi.json                     # 简易模板（示例）
+├── 📝 templates/                        # ⭐ 解析模板存储目录
+│   ├── 576b8c32.json                   # 通用模板
+│   ├── animal_quarantine.json          # 动物检疫证明模板
+│   ├── baohuodan.json                  # 报货单模板
+│   └── jianyi.json                     # 简易模板
 │
-└── 🗂️ config.json                      # 用户配置文件（运行时生成）
+├── 📂 config/                           # 配置目录
+│   ├── config.json                     # 用户配置
+│   └── ui_config.json                  # UI 配置
+│
+└── 📚 docs/                             # 文档
+    ├── API_REFERENCE.md
+    ├── DEVELOPER_GUIDE.md
+    ├── OPTIMIZATION_SUMMARY.md
+    ├── PERFORMANCE_MONITORING.md
+    └── interrupt_mechanism.md
 ```
 
 ---
@@ -95,9 +127,11 @@ OCR-GUI-Tool/
 | `exporter.py` | 结果导出（TXT/Excel） | `Exporter`, `get_exporter()` |
 | `template_manager.py` | 模板 CRUD、序列化 | `TemplateManager`, `ParseTemplate`, `ParseRule` |
 | `text_parser.py` | 基于模板的文本解析 | `TextParser` |
-| `screenshot.py` | Windows 截图 API 封装 | `capture_screen()`, `select_region()` |
+| `screenshot.py` | Windows 截图 API 封装 | `ScreenshotManager`, `capture_screen()` |
 | `async_worker.py` | 异步任务调度 | `AsyncWorker`, `TaskManager` |
-| `performance_monitor.py` | 性能指标收集 | `PerformanceMonitor` |
+| `deduplication.py` | 识别结果去重 | `Deduplicator` |
+| `error_handler.py` | 错误处理 | `ErrorHandler` |
+| `enhanced_error_handler.py` | 增强错误处理 | `EnhancedErrorHandler` |
 
 **设计模式**:
 - **单例模式**: 所有管理器通过 `get_xxx()` 获取全局唯一实例
@@ -144,6 +178,7 @@ MainWindow (FluentWindow)
 | 组件 | 文件 | 用途 |
 |------|------|------|
 | 截图窗口 | `screenshot_window.py` | 全屏遮罩、十字光标、矩形选区 |
+| 错误界面 | `error_ui.py` | 错误展示组件 |
 
 ---
 
@@ -151,19 +186,47 @@ MainWindow (FluentWindow)
 
 | 模块 | 说明 |
 |------|------|
-| `ocr_api.py` | 封装 OCR 引擎的 HTTP/API 调用（预留） |
+| `ocr_api.py` | 封装 OCR 引擎的 HTTP/API 调用 |
 | `PPOCR_api.py` | PaddleOCR 原生 API 兼容层 |
+| `core_api.py` | 核心 API 封装 |
 
 ---
 
-### 4️⃣ **测试层 (tests/)** - 质量保证
+### 4️⃣ **API 服务端 (api_server/)** - 可选服务端架构
+
+```
+api_server/
+├── main.py              # FastAPI 应用入口
+├── adapter.py           # API 适配器（桥接 core 层）
+├── client.py            # API 客户端
+│
+├── routes/              # 路由层
+│   ├── ocr_routes.py   # OCR 相关接口
+│   └── task_routes.py  # 任务管理接口
+│
+├── services/            # 业务服务层
+│   └── ocr_service.py
+│
+├── tasks/               # 异步任务管理
+│   └── task_manager.py
+│
+└── utils/               # 工具层
+    ├── exceptions.py
+    └── response.py
+```
+
+---
+
+### 5️⃣ **测试层 (tests/)** - 质量保证
 
 | 测试文件 | 覆盖模块 | 测试内容 |
 |----------|----------|----------|
 | `test_config.py` | `core/config.py` | 配置读写、默认值、路径验证 |
 | `test_result_manager.py` | `core/result_manager.py` | 结果增删改查、持久化 |
 | `test_exporter.py` | `core/exporter.py` | TXT/Excel 导出格式、编码 |
-| `test_data_*.txt` | - | 测试数据样本（报货单、简易文本） |
+| `test_error_handler.py` | `core/error_handler.py` | 错误处理逻辑 |
+| `test_error_ui.py` | `interfaces/fluent/error_ui.py` | 错误界面组件 |
+| `test_data_*.txt` | - | 测试数据样本 |
 
 **运行测试**:
 ```bash
@@ -172,37 +235,14 @@ pytest tests/ -v
 
 ---
 
-### 5️⃣ **模板层 (templates/)** - 解析模板
+### 6️⃣ **模板层 (templates/)** - 解析模板
 
 | 文件 | 说明 |
 |------|------|
-| `animal_quarantine.json` | 动物检疫证明解析模板（13个规则） |
-| `baohuodan.json` | 报货单解析模板（7个规则） |
-| `jianyi.json` | 简易解析模板（示例） |
-
-**重要说明**:
-- `templates/` 是程序运行时实际使用的模板目录（TemplateManager 默认路径）
-- 如果目录不存在，程序会自动创建
-- 用户可以通过界面"模板管理"页面添加、编辑、删除模板
-- 所有修改会立即同步到此目录下的 JSON 文件
-- 建议定期备份此目录，防止数据丢失
-
----
-
-### 6️⃣ **配置层 (config.json)** - 用户配置
-
-**配置文件位置**: 项目根目录下的 `config.json`
-
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `ocr_exe_path` | OCR 引擎路径 | `PaddleOCR-json/PaddleOCR-json.exe` |
-| `models_path` | 模型目录路径 | `PaddleOCR-json/models` |
-| `language` | 识别语言 | `chinese` |
-| `auto_detect` | 自动检测引擎 | `true` |
-| `hotkey_screenshot` | 截图快捷键 | `Ctrl+Shift+F` |
-| `auto_copy` | 自动复制结果 | `false` |
-| `scan_subdirs` | 扫描子目录 | `true` |
-| `theme` | 主题模式 | `auto` |
+| `576b8c32.json` | 通用解析模板 |
+| `animal_quarantine.json` | 动物检疫证明解析模板 |
+| `baohuodan.json` | 报货单解析模板 |
+| `jianyi.json` | 简易解析模板 |
 
 ---
 
@@ -219,7 +259,7 @@ ocr_engine.py (启动 PaddleOCR-json.exe)
     ↓
 PaddleOCR-json 进程 (返回 JSON 结果)
     ↓
-result_manager.py (保存结果到 history.json)
+result_manager.py (保存结果到历史)
     ↓
 ocr_page.py (更新 UI 显示)
     ↓
@@ -238,65 +278,6 @@ text_parser.py (应用规则解析：keyword/regex/position)
 template_page.py (显示解析结果表格)
     ↓
 用户可保存为新模板或修改现有模板
-```
-
-**模板存储位置**: `templates/*.json`
-
----
-
-## 📊 核心数据结构
-
-### 1. 配置结构 (`config.json`)
-
-```json
-{
-  "ocr_exe_path": "PaddleOCR-json/PaddleOCR-json.exe",
-  "models_path": "PaddleOCR-json/models",
-  "language": "chinese",
-  "auto_detect": true,
-  "hotkey_screenshot": "Ctrl+Shift+F",
-  "auto_copy": false,
-  "scan_subdirs": true,
-  "theme": "auto"
-}
-```
-
-### 2. 识别结果结构
-
-```json
-{
-  "id": "uuid-string",
-  "filename": "example.png",
-  "path": "C:/images/example.png",
-  "text": "识别到的文本内容",
-  "confidence": 0.95,
-  "time": "2026-04-16 14:30:00",
-  "language": "chinese"
-}
-```
-
-### 3. 模板结构
-
-```json
-{
-  "id": "animal_quarantine",
-  "name": "动物检疫证明",
-  "description": "用于解析动物检疫合格证明",
-  "rules": [
-    {
-      "name": "货主",
-      "type": "keyword",
-      "keyword": "货主",
-      "ignore_spaces": true,
-      "use_next_line": true
-    },
-    {
-      "name": "联系电话",
-      "type": "regex",
-      "pattern": "联系电话[：:]\\s*(\\d+)"
-    }
-  ]
-}
 ```
 
 ---
@@ -331,88 +312,6 @@ template_page.py (显示解析结果表格)
 | 单实例检查 | 无 | 无 |
 | 适用场景 | 命令行启动 | F5 直接运行 |
 
-**建议**: 在 IDE 中配置运行配置为 `run.py`，避免每次输入参数。
-
----
-
-## 🎯 关键设计决策
-
-### 1. 为什么只保留 Fluent 界面？
-
-- ✅ **统一体验**: 避免多套 UI 维护成本
-- ✅ **现代化**: Fluent Design 符合 Windows 11 审美
-- ✅ **功能完整**: qfluentwidgets 提供丰富的组件
-- ❌ 移除 Tkinter: 界面简陋、开发效率低
-- ❌ 移除 Web UI: pywebview 依赖复杂、性能差
-- ❌ 移除 PyQt6/PySide6 Dracula: 功能重复、维护负担
-
-### 2. 为什么使用单例模式？
-
-```python
-# 全局唯一实例，避免重复创建
-engine = get_ocr_engine()
-results = get_result_manager()
-config = get_config_manager()
-```
-
-**优势**:
-- 内存效率高（只有一个实例）
-- 状态一致（所有页面共享同一数据源）
-- 线程安全（配合 QThread 使用）
-
-### 3. 为什么使用异步工作线程？
-
-```python
-# 避免阻塞 UI
-worker = OcrInitWorker(...)
-worker.finished.connect(on_finished)
-worker.start()
-```
-
-**原因**:
-- OCR 引擎初始化耗时（1-3 秒）
-- 批量识别需要处理大量图片
-- 保持 UI 响应性（进度条、取消按钮）
-
----
-
-## 🛠️ 开发指南
-
-### 添加新功能
-
-1. **核心逻辑** → 在 `core/` 下创建新模块
-2. **界面页面** → 在 `interfaces/fluent/pages/` 下创建新页面
-3. **注册导航** → 在 `main_window.py` 的 `initNavigation()` 中添加
-4. **编写测试** → 在 `tests/` 下添加单元测试
-
-### 修改现有功能
-
-1. **定位模块**: 根据功能找到对应的 `core/xxx.py`
-2. **修改逻辑**: 确保向后兼容（不影响现有配置）
-3. **更新测试**: 运行 `pytest` 确保无回归
-4. **更新文档**: 修改 `README.md` 或本文件
-
-### 调试技巧
-
-```python
-# 1. 打印日志
-print(f"[DEBUG] 当前配置: {config.get_all()}")
-
-# 2. 使用 InfoBar 提示
-from qfluentwidgets import InfoBar, InfoBarPosition
-InfoBar.success(title="成功", content="操作完成", parent=self)
-
-# 3. 检查信号连接
-self.button.clicked.connect(self.on_click)  # 确保已连接
-
-# 4. 查看异常堆栈
-import traceback
-try:
-    ...
-except Exception as e:
-    traceback.print_exc()
-```
-
 ---
 
 ## 📦 依赖说明
@@ -422,51 +321,46 @@ except Exception as e:
 ```txt
 PySide6>=6.5.0              # Qt6 绑定（GUI 框架）
 PySide6-Fluent-Widgets      # Fluent Design 组件库
-Pillow>=9.0.0               # 图片处理（缩放、格式转换）
+Pillow>=9.0.0               # 图片处理
 openpyxl>=3.0.0             # Excel 导出
-pyperclip>=1.8.0            # 剪贴板操作（复制结果）
+pyperclip>=1.8.0            # 剪贴板操作
 ```
 
 ### 可选依赖
 
 ```txt
 pytest>=7.0.0               # 单元测试框架
-```
-
-### 安装命令
-
-```bash
-pip install PySide6 PySide6-Fluent-Widgets Pillow openpyxl pyperclip
+fastapi>=0.100.0           # API 服务端
+uvicorn>=0.22.0             # ASGI 服务器
 ```
 
 ---
 
 ## 📝 文件统计
 
-| 类别 | 文件数 | 代码行数 |
-|------|--------|----------|
-| 核心模块 (core/) | 9 | ~1,200 |
-| 界面代码 (interfaces/fluent/) | 6 | ~1,800 |
-| 测试代码 (tests/) | 5 | ~700 |
-| API 层 (api/) | 2 | ~300 |
-| 配置文件 | 2 | ~50 |
-| **总计** | **24** | **~4,050** |
-
-*注: 不包含注释和空行，不含 config/parsing_templates/ 下的模板文件*
+| 类别 | 文件数 |
+|------|--------|
+| 核心模块 (core/) | 11 |
+| 界面代码 (interfaces/fluent/) | 10 |
+| 测试代码 (tests/) | 8 |
+| API 层 (api/) | 4 |
+| API 服务端 (api_server/) | 9 |
+| 配置文件 | 4 |
+| **总计** | **46** |
 
 ---
 
 ## 🔮 未来规划
 
-### 短期 (v2.1)
+### 短期 (v2.2)
 - [ ] 支持自定义快捷键
-- [ ] 增加更多导出格式（PDF、Word）
-- [ ] 优化批量识别性能（多线程）
+- [ ] 增加更多导出格式（PDF）
+- [ ] 优化批量识别性能
 
 ### 中期 (v2.5)
 - [ ] 云端同步历史记录
 - [ ] AI 辅助模板生成
-- [ ] 插件系统（扩展解析规则）
+- [ ] API 服务端文档完善
 
 ### 长期 (v3.0)
 - [ ] 跨平台支持（Linux、macOS）
@@ -479,9 +373,8 @@ pip install PySide6 PySide6-Fluent-Widgets Pillow openpyxl pyperclip
 
 - **GitHub**: [Sinory77/OCR-GUI-Tool](https://github.com/Sinory77/OCR-GUI-Tool)
 - **问题反馈**: 提交 Issue
-- **功能建议**: 提交 Feature Request
 
 ---
 
-**最后更新**: 2026-04-16  
+**最后更新**: 2026-05-08
 **维护者**: Sinory

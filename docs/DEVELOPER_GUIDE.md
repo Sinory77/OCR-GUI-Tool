@@ -16,7 +16,7 @@
 ### 1. 克隆仓库
 
 ```bash
-git clone https://github.com/your-org/OCR-GUI-Tool.git
+git clone https://github.com/Sinory77/OCR-GUI-Tool.git
 cd OCR-GUI-Tool
 ```
 
@@ -65,39 +65,66 @@ OCR-GUI-Tool/
 │   ├── __init__.py
 │   ├── config.py           # 配置管理
 │   ├── ocr_engine.py       # OCR 引擎封装
-│   ├── screenshot.py       # 截图功能（ScreenshotManager 和 HotkeyManager）
+│   ├── screenshot.py       # 截图功能
 │   ├── result_manager.py   # 结果与历史管理
 │   ├── exporter.py         # 导出功能
 │   ├── template_manager.py # 模板管理器
-│   └── text_parser.py      # 文本解析器
+│   ├── text_parser.py      # 文本解析器
+│   ├── async_worker.py     # 异步工作线程
+│   ├── deduplication.py    # 去重功能
+│   ├── error_handler.py    # 错误处理
+│   └── enhanced_error_handler.py  # 增强错误处理
 │
 ├── interfaces/              # 界面层
-│   ├── fluent/             # Fluent Design UI
-│   ├── pyside6_dracula/    # PySide6 Dracula 主题
-│   ├── pyqt6_ui/           # PyQt6 UI
-│   ├── web_ui/             # Web UI
-│   └── tkinter_ui.py       # Tkinter UI
+│   └── fluent/             # Fluent Design UI
+│       ├── main_window.py
+│       ├── ui_utils.py
+│       ├── ui_config.py
+│       ├── error_ui.py
+│       ├── components/
+│       │   └── screenshot_window.py
+│       └── pages/
+│           ├── ocr_page.py
+│           ├── history_page.py
+│           ├── template_page.py
+│           └── settings_page.py
 │
 ├── api/                     # API 接口层
-│   └── PPOCR_api.py        # PaddleOCR-json API
+│   ├── __init__.py
+│   ├── PPOCR_api.py
+│   ├── core_api.py
+│   └── ocr_api.py
+│
+├── api_server/              # API 服务端（可选）
+│   ├── main.py
+│   ├── adapter.py
+│   ├── client.py
+│   ├── routes/
+│   ├── services/
+│   ├── tasks/
+│   └── utils/
 │
 ├── tests/                   # 单元测试
 │   ├── test_config.py
 │   ├── test_result_manager.py
-│   └── test_exporter.py
+│   ├── test_exporter.py
+│   ├── test_error_handler.py
+│   ├── test_error_ui.py
+│   └── test_data_*.txt
+│
+├── templates/               # 解析模板
+│   └── *.json
+│
+├── config/                  # 配置目录
+│   ├── config.json
+│   └── ui_config.json
 │
 ├── docs/                    # 文档
-│   ├── API_REFERENCE.md
-│   └── DEVELOPER_GUIDE.md
 │
-├── .github/workflows/       # CI/CD 配置
-│   ├── ci.yml
-│   └── release.yml
-│
-├── requirements.txt         # 生产依赖
-├── requirements-dev.txt     # 开发依赖
-├── pytest.ini              # pytest 配置
-└── README.md               # 项目说明
+├── requirements.txt
+├── requirements-dev.txt
+├── pytest.ini
+└── README.md
 ```
 
 ### 架构原则
@@ -273,7 +300,7 @@ class TestMyFeature:
 - **配置管理**: 90%+ 覆盖率
 - **结果管理**: 85%+ 覆盖率
 - **导出功能**: 80%+ 覆盖率
-- **OCR 引擎**: 75%+ 覆盖率（部分需要真实 OCR 引擎）
+- **OCR 引擎**: 75%+ 覆盖率
 
 ---
 
@@ -328,26 +355,11 @@ git push origin feature/your-feature-name
 
 ## 常见问题
 
-### Q1: 如何添加新的 UI 框架？
+### Q1: 如何添加新的页面？
 
-1. 在 `interfaces/` 下创建新目录
-2. 实现核心接口，调用 `core/` 层功能
-3. 确保不修改 core 层代码
-4. 添加启动脚本
-
-示例：
-```python
-# interfaces/my_ui/main.py
-from core.config import get_config_manager
-from core.ocr_engine import get_ocr_engine
-from core.result_manager import get_result_manager
-
-config = get_config_manager()
-engine = get_ocr_engine()
-manager = get_result_manager()
-
-# 实现 UI 逻辑...
-```
+1. 在 `interfaces/fluent/pages/` 下创建新页面
+2. 在 `main_window.py` 的 `initNavigation()` 中注册
+3. 连接必要的信号
 
 ### Q2: 如何调试 OCR 引擎问题？
 
@@ -364,24 +376,17 @@ result = engine.recognize("test.png")
 
 ### Q3: 如何处理配置冲突？
 
-配置文件位于 `config.json`，如果遇到问题：
+配置文件位于 `config/config.json`，如果遇到问题：
 
-1. 删除 `config.json`（会自动重建）
+1. 删除 `config/config.json`（会自动重建）
 2. 检查路径是否正确
-3. 使用 `auto_detect_paths()` 自动检测
+3. 使用 UI 设置页面重新配置
 
-### Q4: 如何贡献文档？
-
-1. 在 `docs/` 目录下添加 Markdown 文件
-2. 更新相关的索引文件
-3. 确保链接正确
-4. 提交 PR
-
-### Q5: 性能优化建议
+### Q4: 性能优化建议
 
 1. **避免重复初始化**: 使用全局实例获取函数
 2. **批量处理**: 使用 `ResultExporter` 批量导出
-3. **异步操作**: UI 层使用线程处理耗时操作
+3. **异步操作**: UI 层使用 QThread 处理耗时操作
 4. **缓存**: 配置和模板都有内置缓存
 
 ---
@@ -431,24 +436,17 @@ breakpoint()
 pytest tests/ -v
 
 # 3. 创建标签
-git tag -a v1.0.0 -m "Release version 1.0.0"
+git tag -a v2.1.0 -m "Release version 2.1.0"
 
 # 4. 推送标签
-git push origin v1.0.0
+git push origin v2.1.0
 ```
-
-### 3. 自动化发布
-
-CI/CD 会在创建 Release 时自动：
-1. 构建可执行文件
-2. 上传到 GitHub Releases
-3. 生成变更日志
 
 ---
 
 ## 联系方式
 
-- **Issues**: [GitHub Issues](https://github.com/your-org/OCR-GUI-Tool/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/your-org/OCR-GUI-Tool/discussions)
+- **Issues**: [GitHub Issues](https://github.com/Sinory77/OCR-GUI-Tool/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/Sinory77/OCR-GUI-Tool/discussions)
 
 感谢你的贡献！

@@ -8,6 +8,9 @@
   - [ResultManager](#resultmanager)
   - [ResultExporter](#resultexporter)
   - [ScreenshotManager](#screenshotmanager)
+  - [Deduplicator](#deduplicator)
+  - [ErrorHandler](#errorhandler)
+  - [EnhancedErrorHandler](#enhancederrorhandler)
 
 ---
 
@@ -139,6 +142,10 @@ def set_language(language: str) -> bool
 
 # 参数更新
 def update_args(new_args: Dict[str, Any]) -> None
+
+# 中断支持
+def is_interrupted() -> bool
+def set_interrupted_callback(callback: Callable[[], bool]) -> None
 ```
 
 #### 返回结果格式
@@ -374,40 +381,107 @@ hotkey_manager.stop_listening()
 hotkey_manager.unregister(hotkey_id)
 ```
 
+---
+
+### Deduplicator
+
+识别结果去重功能。
+
+#### 初始化
+
+```python
+from core.deduplication import Deduplicator
+
+dedup = Deduplicator()
+```
+
+#### 核心方法
+
+```python
+# 添加文本进行去重
+def add(text: str, threshold: float = 0.9) -> bool
+"""返回 True 表示是新文本，False 表示是重复文本"""
+
+# 获取唯一文本列表
+def get_unique_texts() -> List[str]
+
+# 获取重复文本列表
+def get_duplicate_texts() -> List[str]
+
+# 清空
+def clear() -> None
+
+# 获取统计
+def get_stats() -> Dict[str, int]
+```
+
 #### 使用示例
 
 ```python
-from core.screenshot import get_screenshot_manager, get_hotkey_manager
+dedup = Deduplicator()
 
-# 截图管理
-manager = get_screenshot_manager()
+# 添加文本
+if dedup.add("识别的文本内容"):
+    print("新文本，已添加")
+else:
+    print("重复文本，已忽略")
 
-# 截取全屏
-temp_path = manager.capture_full_screen()
-if temp_path:
-    print(f"全屏截图已保存: {temp_path}")
+# 获取去重后的结果
+unique = dedup.get_unique_texts()
+print(f"唯一文本数量: {len(unique)}")
+```
 
-# 截取指定区域
-region_path = manager.capture_screen_region(100, 100, 800, 600)
+---
 
-# 延迟截图
-delayed_path = manager.capture_with_delay(5)  # 5秒后截图
+### ErrorHandler
 
-# 保存到剪贴板
-manager.save_to_clipboard(temp_path)
+错误处理基类。
 
-# 快捷键管理
-hotkey_manager = get_hotkey_manager()
+#### 核心方法
 
-def on_screenshot():
-    print("快捷键触发截图")
-    manager.capture_full_screen()
+```python
+class ErrorHandler:
+    def handle_error(self, error: Exception, context: str = "") -> Dict[str, Any]:
+        """处理错误并返回错误信息"""
+        
+    def get_error_message(self, error: Exception) -> str:
+        """获取错误消息"""
+        
+    def log_error(self, error: Exception, context: str = "") -> None:
+        """记录错误日志"""
+```
 
-# 注册快捷键
-hotkey_id = hotkey_manager.register("F1", on_screenshot)
+---
 
-# 开始监听
-hotkey_manager.start_listening()
+### EnhancedErrorHandler
+
+增强错误处理，支持更多功能。
+
+#### 初始化
+
+```python
+from core.enhanced_error_handler import EnhancedErrorHandler
+
+handler = EnhancedErrorHandler()
+```
+
+#### 核心方法
+
+```python
+# 基本错误处理
+def handle_error(self, error: Exception, context: str = "") -> Dict[str, Any]
+
+# 用户友好的错误消息
+def get_user_friendly_message(self, error: Exception) -> str
+
+# 错误恢复建议
+def get_recovery_suggestions(self, error: Exception) -> List[str]
+
+# 错误分类
+def categorize_error(self, error: Exception) -> str
+
+# 错误报告
+def generate_error_report(self, error: Exception, context: str = "") -> str
 ```
 
 ---
@@ -422,6 +496,7 @@ from core.ocr_engine import get_ocr_engine, reset_ocr_engine
 from core.result_manager import get_result_manager
 from core.exporter import get_exporter, reset_exporter
 from core.screenshot import get_screenshot_manager, get_hotkey_manager
+from core.deduplication import get_deduplicator
 
 # 获取单例
 config = get_config_manager()
@@ -430,6 +505,7 @@ manager = get_result_manager()
 exporter = get_exporter()
 screenshot_manager = get_screenshot_manager()
 hotkey_manager = get_hotkey_manager()
+dedup = get_deduplicator()
 
 # 重置实例（用于重新配置）
 reset_ocr_engine(exe_path=new_path, language="English")

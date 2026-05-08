@@ -1,20 +1,21 @@
-# OCR-GUI API 服务重构文档
+# OCR-GUI-Tool API 服务文档
 
 ## 项目架构
 
 ### 目录结构
+
 ```
 api_server/
 ├── main.py                 # FastAPI主应用
 ├── client.py               # API客户端
 ├── adapter.py              # API适配器
 ├── routes/                 # API路由层
-│   ├── task_routes.py      # 任务相关路由
-│   └── ocr_routes.py       # OCR相关路由
+│   ├── task_routes.py     # 任务相关路由
+│   └── ocr_routes.py      # OCR相关路由
 ├── services/               # 业务服务层
-│   └── ocr_service.py      # OCR服务
+│   └── ocr_service.py     # OCR服务
 ├── tasks/                  # 异步任务管理层
-│   └── task_manager.py     # 任务管理器
+│   └── task_manager.py    # 任务管理器
 └── utils/                  # 工具公共层
     ├── response.py         # 统一响应格式
     └── exceptions.py       # 异常处理
@@ -108,10 +109,11 @@ api_server/
 
 ```bash
 # 启动API服务器
-python start_api.py
+cd api_server
+uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 
-# 或者直接使用uvicorn
-uvicorn api_server.main:app --host 127.0.0.1 --port 8000 --reload
+# 或使用 Python
+python -m uvicorn api_server.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 ## UI层调用示例
@@ -141,4 +143,9 @@ if result.success:
 4. **线程安全**：内置任务管理器确保线程安全
 5. **错误处理**：全局异常捕获和处理
 6. **向后兼容**：通过适配器保持与现有代码的兼容性
-```
+
+## 注意事项
+
+- API 服务端为可选组件，GUI 模式可独立运行
+- 启动前请确保 PaddleOCR-json 引擎已正确配置
+- 默认端口 8000，如有冲突请修改

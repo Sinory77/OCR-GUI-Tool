@@ -22,6 +22,7 @@ from .pages.settings_page import SettingsPage
 from .ui_utils import create_engine_config_dialog
 from .error_ui import ErrorHandlerUI
 from core.error_handler import get_error_handler, ErrorType, OCRError
+from core.async_worker import get_task_manager
 
 
 class MainWindow(FluentWindow):
@@ -62,20 +63,29 @@ class MainWindow(FluentWindow):
             y = (rect.height() - self.height()) // 2 + rect.y()
             self.move(x, y)
     
+    def _get_api(self):
+        """获取核心API实例，延迟初始化"""
+        if not hasattr(self, 'api') or self.api is None:
+            from api.core_api import get_core_api
+            self.api = get_core_api()
+        return self.api
+    
     def initCore(self):
         """初始化核心模块"""
-        from core.ocr_engine import get_ocr_engine
-        from core.result_manager import get_result_manager
-        from core.exporter import get_exporter
-        from core.async_worker import get_task_manager
-        
-        # 获取全局 OCR 引擎实例
-        self.ocr_engine = get_ocr_engine()
-        self.result_manager = get_result_manager()
-        self.exporter = get_exporter()
+        # 延迟初始化核心API，直到需要时才创建
+        # 注意：不再在 initCore 中初始化API，而是在需要时通过 _get_api() 方法获取
         
         # 获取全局任务管理器
+        from core.async_worker import get_task_manager
         self.task_manager = get_task_manager()
+    
+    def get_ocr_engine(self):
+        """获取OCR引擎实例"""
+        return self._get_api().ocr_engine
+    
+    def get_result_manager(self):
+        """获取结果管理器实例"""
+        return self._get_api().result_manager
     
     def loadTranslator(self):
         """加载翻译器"""
@@ -91,18 +101,34 @@ class MainWindow(FluentWindow):
         """初始化错误处理"""
         # 创建界面错误处理器
         self.error_ui = ErrorHandlerUI(self)
-        
+
+        # 连接信号：在主线程显示 InfoBar
+        self.error_ui.show_info_bar_signal.connect(self._on_show_info_bar)
+
         # 获取全局错误处理器
         error_handler = get_error_handler()
-        
+
         # 注册错误处理回调
         for error_type in ErrorType:
             error_handler.register_callback(error_type, self._handle_error)
-    
+
     def _handle_error(self, error: OCRError):
-        """处理错误的回调函数"""
-        # 显示错误信息
+        """处理错误的回调函数（可能在 worker 线程执行）"""
+        # handle_ocr_error 会通过信号在主线程显示 UI
         self.error_ui.handle_ocr_error(error)
+
+    def _on_show_info_bar(self, data: str):
+        """
+        在主线程显示 InfoBar（槽函数）
+
+        Args:
+            data: 格式 "success|消息" 或 "error|标题|内容"
+        """
+        parts = data.split("|", 2)
+        if parts[0] == "success":
+            self.error_ui.show_success("恢复成功", parts[1])
+        elif parts[0] == "error":
+            self.error_ui.show_error(parts[1], parts[2])
     
     def initNavigation(self):
         """初始化导航"""
@@ -115,6 +141,9 @@ class MainWindow(FluentWindow):
         
         self.history_page = HistoryPage(self)
         self.history_page.setObjectName("history_page")
+        # 确保 api 已初始化，然后刷新历史页面
+        self._get_api()
+        self.history_page.loadHistory()
         
         self.settings_page = SettingsPage(self)
         self.settings_page.setObjectName("settings_page")
@@ -161,6 +190,9 @@ class MainWindow(FluentWindow):
         """连接信号"""
         # 从 OCR 页面跳转到历史记录
         self.ocr_page.ocr_completed.connect(self.onOcrCompleted)
+        
+        # 批量识别完成时刷新历史记录
+        self.ocr_page.batch_ocr_completed.connect(self.onOcrCompleted)
 
         # 监听页面切换，切换到 OCR 页面时检查引擎就绪状态
         # 使用 stackedWidget.currentChanged 而不是 navigationInterface（后者没有此信号）
@@ -237,35 +269,40 @@ class MainWindow(FluentWindow):
         """启动异步 OCR 引擎初始化"""
         from core.async_worker import OcrInitWorker
         
-        # 创建工作线程
+        # 创建工作线程，不设置父对象以避免跨线程问题
         self.init_worker = OcrInitWorker(
-            ocr_engine=self.ocr_engine,
+            ocr_engine=self.get_ocr_engine(),
             exe_path=exe_path,
             models_path=models_path,
             language=language,
-            parent=self
+            parent=None
         )
         
-        # 连接信号
-        self.init_worker.finished.connect(self._on_ocr_init_finished)
-        self.init_worker.error.connect(self._on_ocr_init_error)
+        # 连接信号，使用 QueuedConnection 确保在主线程中执行
+        self.init_worker.finished.connect(self._on_ocr_init_finished, Qt.QueuedConnection)
+        self.init_worker.error.connect(self._on_ocr_init_error, Qt.QueuedConnection)
         
         # 启动线程
         self.init_worker.start()
     
     def _on_ocr_init_finished(self, result: dict):
         """OCR 引擎初始化完成回调"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
         success = result.get("success", False)
         message = result.get("message", "")
         
         if success:
             # 初始化成功（绿色），显示通知
+            logger.info(f"[MainWindow] 收到初始化成功信号，准备更新状态栏")
             self.ocr_page.update_engine_status(show_notification=True)
-            print(f"[OCR] 引擎初始化成功: {message}")
+            logger.info(f"[OCR] 引擎初始化成功: {message}")
         else:
             # 初始化失败（红色）
+            logger.error(f"[MainWindow] 收到初始化失败信号: {message}")
             self.ocr_page.set_engine_error()
-            print(f"[OCR] 引擎初始化失败: {message}")
+            logger.error(f"[OCR] 引擎初始化失败: {message}")
     
     def _on_ocr_init_error(self, error_msg: str):
         """OCR 引擎初始化错误回调"""
@@ -306,24 +343,24 @@ class MainWindow(FluentWindow):
         # 显示初始化中状态
         self.ocr_page.set_engine_initializing()
         
-        # 创建工作线程
+        # 创建工作线程，不设置父对象以避免跨线程问题
         self.init_worker = OcrInitWorker(
-            ocr_engine=self.ocr_engine,
+            ocr_engine=self.get_ocr_engine(),
             exe_path=exe_path,
             models_path=models_path,
             language=get_config_manager().get_language(),
-            parent=self
+            parent=None
         )
         
-        # 连接信号
-        self.init_worker.finished.connect(self._on_ocr_init_finished)
-        self.init_worker.error.connect(self._on_ocr_init_error)
+        # 连接信号，使用 QueuedConnection 确保在主线程中执行
+        self.init_worker.finished.connect(self._on_ocr_init_finished, Qt.QueuedConnection)
+        self.init_worker.error.connect(self._on_ocr_init_error, Qt.QueuedConnection)
         
         # 启动线程
         self.init_worker.start()
     
-    def onOcrCompleted(self, image_path):
-        """OCR 识别完成"""
+    def onOcrCompleted(self, image_path=None):
+        """OCR 识别完成（单图/批量均可触发）"""
         # 刷新历史记录
         self.history_page.loadHistory()
         # 注释掉：识别完成后不跳转到历史记录
@@ -338,6 +375,6 @@ class MainWindow(FluentWindow):
         
         # 关闭 OCR 引擎
         if hasattr(self, 'ocr_engine'):
-            self.ocr_engine.close()
+            self.get_ocr_engine().close()
         
         super().closeEvent(event)

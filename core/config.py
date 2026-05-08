@@ -115,9 +115,6 @@ class ConfigManager:
             "ocr_exe_path": DEFAULT_OCR_EXE,
             "models_path": DEFAULT_MODELS_PATH,
             "language": "简体中文",
-            "ui_language": "中文",
-            "auto_copy": False,
-            "theme": "跟随系统",
             "confidence_threshold": 50,
             "auto_detect": False,       # 自动检测开关状态
             "long_image_mode": True,    # 超长图切片识别模式（默认开启）
@@ -126,6 +123,8 @@ class ConfigManager:
             "scan_subdirs": True,       # 是否扫描子目录
             "history_storage_limit": 100,  # 历史记录存储上限
             "history_display_limit": 50,   # 历史记录显示上限
+            "file_dedup_enabled": True,   # 识别前文件去重
+            "text_dedup_enabled": True,    # 识别后内容去重
         }
 
     @error_handling(ErrorType.CONFIG, "保存配置文件失败")
@@ -278,43 +277,7 @@ class ConfigManager:
             return False
         return self.set("language", language)
 
-    def get_auto_copy(self) -> bool:
-        """获取自动复制设置
-        
-        Returns:
-            是否启用自动复制
-        """
-        return self.get("auto_copy", False)
 
-    def set_auto_copy(self, enabled: bool) -> bool:
-        """设置自动复制
-        
-        Args:
-            enabled: 是否启用
-            
-        Returns:
-            是否保存成功
-        """
-        return self.set("auto_copy", bool(enabled))
-
-    def get_theme(self) -> str:
-        """获取主题设置
-        
-        Returns:
-            主题名称
-        """
-        return self.get("theme", "跟随系统")
-
-    def set_theme(self, theme: str) -> bool:
-        """设置主题
-        
-        Args:
-            theme: 主题名称
-            
-        Returns:
-            是否保存成功
-        """
-        return self.set("theme", theme)
 
     def get_confidence_threshold(self) -> int:
         """获取置信度阈值（0-100）
@@ -490,25 +453,45 @@ class ConfigManager:
             logger.error(f"无效的显示上限: {limit}，应在 10-500 之间")
             return False
         return self.set("history_display_limit", int(limit))
-    
-    def get_ui_language(self) -> str:
-        """获取界面语言
-        
+
+    def get_file_dedup_enabled(self) -> bool:
+        """获取文件去重开关状态
+
         Returns:
-            界面语言
+            是否启用文件去重
         """
-        return self.get("ui_language", "中文")
-    
-    def set_ui_language(self, language: str) -> bool:
-        """设置界面语言
-        
+        return self.get("file_dedup_enabled", True)
+
+    def set_file_dedup_enabled(self, enabled: bool) -> bool:
+        """设置文件去重开关状态
+
         Args:
-            language: 界面语言
-            
+            enabled: 是否启用
+
         Returns:
             是否保存成功
         """
-        return self.set("ui_language", language)
+        return self.set("file_dedup_enabled", bool(enabled))
+
+    def get_text_dedup_enabled(self) -> bool:
+        """获取内容去重开关状态
+
+        Returns:
+            是否启用内容去重
+        """
+        return self.get("text_dedup_enabled", True)
+
+    def set_text_dedup_enabled(self, enabled: bool) -> bool:
+        """设置内容去重开关状态
+
+        Args:
+            enabled: 是否启用
+
+        Returns:
+            是否保存成功
+        """
+        return self.set("text_dedup_enabled", bool(enabled))
+
 
     def auto_detect_paths(self):
         """
@@ -618,24 +601,3 @@ def get_config_manager():
     if _config_manager is None:
         _config_manager = ConfigManager()
     return _config_manager
-
-
-def copy_to_clipboard(text: str) -> bool:
-    """
-    复制文本到剪贴板（核心层功能）
-    
-    Args:
-        text: 要复制的文本
-        
-    Returns:
-        bool: 是否成功
-    """
-    try:
-        from PySide6.QtWidgets import QApplication
-        from PySide6.QtGui import QGuiApplication
-        clipboard = QGuiApplication.clipboard()
-        clipboard.setText(text)
-        return True
-    except Exception as e:
-        print(f"复制到剪贴板失败: {e}")
-        return False

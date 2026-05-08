@@ -5,6 +5,7 @@
 """
 
 from qfluentwidgets import MessageBox, MessageBoxBase, MessageDialog
+from PySide6.QtGui import QGuiApplication
 
 
 def create_message_box(title: str, content: str, parent=None) -> MessageBox:
@@ -51,5 +52,24 @@ def create_engine_config_dialog(parent=None) -> MessageDialog:
         parent=parent
     )
     dialog.yesButton.setText("自动搜索")
-    dialog.cancelButton.setText("手动设置")
+    dialog.cancelButton.setText("取消")
     return dialog
+
+
+def copy_to_clipboard(text: str) -> bool:
+    """
+    复制文本到剪贴板（界面层功能）
+    
+    Args:
+        text: 要复制的文本
+        
+    Returns:
+        bool: 是否成功
+    """
+    try:
+        clipboard = QGuiApplication.clipboard()
+        clipboard.setText(text)
+        return True
+    except Exception as e:
+        print(f"复制到剪贴板失败: {e}")
+        return False

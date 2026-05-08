@@ -23,10 +23,54 @@ class ResultExporter:
     5. 提供结果的合并和格式化
     """
     
-    def __init__(self):
-        """初始化导出器"""
+    def __init__(self, results: List[Dict[str, Any]] = None):
+        """初始化导出器
+        
+        Args:
+            results: 可选，初始结果列表（批量导出时传 results_for_export）
+        """
         self.results: List[Dict[str, Any]] = []
         self.image_paths: List[str] = []
+        if results:
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                # 统一处理 image_path / file_path / path 字段
+                img_path = item.get('image_path') or item.get('file_path') or item.get('path', '')
+                # 如果是已构造的导出格式（含 file_path, result），直接追加
+                if 'result' in item and img_path:
+                    self.results.append(item)
+                    if img_path not in self.image_paths:
+                        self.image_paths.append(img_path)
+                # 否则交给 load_from_history 处理
+                else:
+                    self.load_from_history([item])
+    
+    def load_from_history(self, history_items: List[Dict[str, Any]]) -> None:
+        """从历史记录加载数据（历史格式与识别结果格式不同，需要转换）
+        
+        Args:
+            history_items: 历史记录列表，每项包含 path, filename, text, time 等
+        """
+        for item in history_items:
+            path = item.get('path', '')
+            if not path:
+                continue
+            # 历史记录中的 text 字段是已拼接的纯文本
+            text = item.get('text', '')
+            # 转换为导出器需要的格式
+            self.results.append({
+                'image_path': path,
+                'result': {
+                    'code': 100 if item.get('success') else 999,
+                    'data': [{'text': line} for line in text.splitlines() if line],
+                    'texts': item.get('full_texts', []),
+                    'boxes': []
+                },
+                'timestamp': item.get('time', '')
+            })
+            if path not in self.image_paths:
+                self.image_paths.append(path)
     
     def add_result(self, image_path: str, ocr_result: Dict[str, Any]) -> None:
         """添加识别结果

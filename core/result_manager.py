@@ -59,13 +59,25 @@ class ResultManager:
         if self.history_file.exists():
             try:
                 with open(self.history_file, 'r', encoding='utf-8') as f:
-                    self.history = json.load(f)
+                    content = f.read().strip()
+                    if not content:
+                        # 空文件
+                        self.history = []
+                    elif content == "null":
+                        # 遗留的无效内容
+                        self.history = []
+                    else:
+                        self.history = json.loads(content)
                 logger.info(f"已加载 {len(self.history)} 条历史记录")
                 return True
             except json.JSONDecodeError as e:
-                raise FileOperationError(f"历史记录文件格式错误: {str(e)}", e)
+                logger.warning(f"历史记录文件格式错误，重置为空: {e}")
+                self.history = []
+                return True  # 不再抛出异常，允许程序启动
             except Exception as e:
-                raise FileOperationError(f"加载历史记录失败: {str(e)}", e)
+                logger.warning(f"加载历史记录失败，重置为空: {e}")
+                self.history = []
+                return True  # 不再抛出异常，允许程序启动
         else:
             logger.debug("历史记录文件不存在，创建新记录")
             self.history = []
@@ -92,50 +104,63 @@ class ResultManager:
     
     def add_result(self, image_path: str, ocr_result: Dict[str, Any]) -> Dict[str, Any]:
         """
-        添加识别结果
-        
+        添加识别结果（按路径排重：已存在则更新，不存在则新增）
+
         Args:
             image_path: 图片路径
             ocr_result: OCR 识别结果
-            
+
         Returns:
             历史记录条目
         """
         if not image_path:
             logger.warning("尝试添加空图片路径的识别结果")
-        
+
         # 保存到当前结果
         self.current_results[image_path] = ocr_result
-        
+
         # 提取纯文本
         texts = []
         if ocr_result.get('code') == 100 and ocr_result.get('data'):
             for item in ocr_result['data']:
                 if isinstance(item, dict) and 'text' in item:
                     texts.append(item['text'])
-        
-        # 添加到历史记录
+
+        # 检查是否已存在相同路径的记录（按路径排重）
+        timestamp = self._get_timestamp()
+        for entry in self.history:
+            if entry.get('path') == image_path:
+                # 已存在，更新时间和结果
+                entry['time'] = timestamp
+                entry['text'] = '\n'.join(texts)
+                entry['full_texts'] = texts
+                entry['success'] = ocr_result.get('code') == 100
+                self.save_history()
+                logger.info(f"已更新历史记录: {entry['filename']}")
+                return entry
+
+        # 不存在，新增记录
         entry = {
             'path': image_path,
             'filename': os.path.basename(image_path) if image_path else '未知',
             'text': '\n'.join(texts),
             'full_texts': texts,
-            'time': self._get_timestamp(),
+            'time': timestamp,
             'success': ocr_result.get('code') == 100
         }
-        
+
         self.history.append(entry)
-        
+
         # 只保留最近配置上限条
         storage_limit = self.config.get_history_storage_limit()
         if len(self.history) > storage_limit:
             removed_count = len(self.history) - storage_limit
             self.history = self.history[-storage_limit:]
             logger.debug(f"历史记录超出限制，已删除 {removed_count} 条旧记录")
-        
+
         # 保存到文件
         self.save_history()
-        
+
         logger.info(f"已添加识别结果到历史记录: {entry['filename']}")
         return entry
     
@@ -195,6 +220,26 @@ class ResultManager:
         self.history = []
         self.save_history()
         logger.info(f"已清空 {count} 条历史记录")
+        return True
+    
+    def clear_all(self) -> bool:
+        """清空所有历史记录和当前结果
+        
+        Returns:
+            是否清空成功
+        """
+        # 清空历史记录
+        history_count = len(self.history)
+        self.history = []
+        
+        # 清空当前结果
+        current_count = len(self.current_results)
+        self.current_results = {}
+        
+        # 保存历史记录（此时为空）
+        self.save_history()
+        
+        logger.info(f"已清空所有数据：{history_count} 条历史记录，{current_count} 条当前结果")
         return True
     
     def get_result(self, image_path):

@@ -149,10 +149,10 @@ class ErrorHandler:
             是否恢复成功
         """
         try:
-            from .ocr_engine import get_ocr_engine
-            ocr_engine = get_ocr_engine()
-            # 尝试重新初始化 OCR 引擎
-            return ocr_engine.initialize()
+            # 注意：不再尝试创建新的 OCR 引擎实例，因为这可能导致循环导入
+            # 错误恢复应该由调用方处理，而不是在错误处理器中创建新的实例
+            logger.info("OCR 引擎错误恢复：请检查 OCR 引擎配置")
+            return False
         except Exception as e:
             logger.error(f"OCR 引擎恢复失败: {e}")
             return False

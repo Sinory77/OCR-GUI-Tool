@@ -171,10 +171,11 @@ class HistoryPage(QWidget):
     def loadHistory(self):
         """加载历史记录"""
         # 检查 result_manager 是否已初始化
-        if not hasattr(self.main_window, 'result_manager') or not self.main_window.result_manager:
+        # 检查主窗口是否具有API实例
+        if not hasattr(self.main_window, 'api') or not self.main_window.api:
             return
         
-        history = self.main_window.result_manager.get_history()
+        history = self.main_window.api.get_history_results()
         self.history_model.updateData(history)
         self.history_count.setText(f"({len(history)} 条)")
 
@@ -184,7 +185,7 @@ class HistoryPage(QWidget):
     def onItemClicked(self, index):
         """点击列表项"""
         row = index.row()
-        history = self.main_window.result_manager.get_history()
+        history = self.main_window.api.get_history_results()
 
         if 0 <= row < len(history):
             self.current_index = row
@@ -201,13 +202,13 @@ class HistoryPage(QWidget):
 
     def copyResult(self):
         """复制结果"""
-        history = self.main_window.result_manager.get_history()
+        history = self.main_window.api.get_history_results()
         if 0 <= self.current_index < len(history):
             item = history[self.current_index]
             text = item.get('text', '')
             if text:
-                # 调用核心层复制到剪贴板
-                from core.config import copy_to_clipboard
+                # 调用界面层复制到剪贴板
+                from interfaces.fluent.ui_utils import copy_to_clipboard
                 if copy_to_clipboard(text):
                     InfoBar.success(
                         title="已复制",
@@ -221,7 +222,7 @@ class HistoryPage(QWidget):
 
     def recognizeAgain(self):
         """重新识别"""
-        history = self.main_window.result_manager.get_history()
+        history = self.main_window.api.get_history_results()
         if 0 <= self.current_index < len(history):
             item = history[self.current_index]
             image_path = item.get('path')
@@ -247,7 +248,7 @@ class HistoryPage(QWidget):
     def deleteCurrent(self):
         """删除当前项"""
         if self.current_index >= 0:
-            if self.main_window.result_manager.delete_history(self.current_index):
+            if self.main_window.api.delete_history_by_index(self.current_index):
                 InfoBar.success(
                     title="已删除",
                     content="历史记录已删除",
@@ -275,7 +276,7 @@ class HistoryPage(QWidget):
             self.window()
         )
         if message_box.exec():
-            self.main_window.result_manager.clear_history()
+            self.main_window.api.clear_all_history()
 
             InfoBar.success(
                 title="已清空",

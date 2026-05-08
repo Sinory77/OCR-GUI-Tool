@@ -4,6 +4,7 @@
 """
 import os
 import time
+import threading
 from PySide6.QtCore import (
     QThread, QObject, Signal, QThreadPool, QRunnable, 
     QTimer, QMetaObject, Qt, QElapsedTimer
@@ -31,14 +32,6 @@ class TaskStatus:
     CANCELLED = "cancelled"
 
 
-class TaskSignal(QObject):
-    """任务信号包装器 - 用于 QRunnable 的信号发射"""
-    progress = Signal(object)  # progress_data
-    finished = Signal(object)  # result
-    error = Signal(str)  # error_message
-    status_changed = Signal(str, str)  # task_id, status
-
-
 class AsyncTask(QRunnable):
     """
     通用异步任务 - 基于 QRunnable + QThreadPool
@@ -48,133 +41,64 @@ class AsyncTask(QRunnable):
         def on_result(result):
             print(f"任务完成: {result}")
         
+        def on_progress(progress_data):
+            print(f"进度: {progress_data}")
+        
         task = AsyncTask(
-            worker_fn=lambda: heavy_computation(),
+            work_func=lambda: time.sleep(1) or "完成",
             on_finished=on_result,
             on_error=lambda e: print(f"错误: {e}"),
-            on_progress=lambda p: print(f"进度: {p}"),
+            on_progress=on_progress
         )
-        task.start()
+        thread_pool.start(task)
     """
     
-    def __init__(
-        self,
-        worker_fn: Callable,
-        on_finished: Optional[Callable] = None,
-        on_error: Optional[Callable] = None,
-        on_progress: Optional[Callable] = None,
-        task_id: str = "",
-        priority: int = TaskPriority.NORMAL,
-        timeout: Optional[int] = None,  # 超时时间（秒）
-    ):
+    def __init__(self, work_func: Callable, on_finished: Optional[Callable] = None, 
+                 on_error: Optional[Callable] = None, on_progress: Optional[Callable] = None):
         super().__init__()
-        self.worker_fn = worker_fn
+        self.work_func = work_func
         self.on_finished = on_finished
         self.on_error = on_error
         self.on_progress = on_progress
-        self.task_id = task_id or f"task_{int(time.time() * 1000)}"
-        self.priority = priority
-        self.timeout = timeout
-        self.setAutoDelete(True)
-        self._is_cancelled = False
-        
-        # 信号发射器（用于跨线程安全通信）
-        self.signals = TaskSignal()
-        
-        # 连接信号到回调
-        if on_finished:
-            self.signals.finished.connect(on_finished)
-        if on_error:
-            self.signals.error.connect(on_error)
-        if on_progress:
-            self.signals.progress.connect(on_progress)
     
     def run(self):
-        """在线程池中执行任务"""
-        timer = QElapsedTimer()
-        timer.start()
-        
+        """执行任务"""
         try:
-            logger.debug(f"[AsyncTask] 开始执行: {self.task_id} (优先级: {self.priority})")
-            self.signals.status_changed.emit(self.task_id, TaskStatus.RUNNING)
-            
-            # 执行工作函数，传入进度回调
-            def report_progress(data):
-                if self._is_cancelled:
-                    raise Exception("任务已取消")
-                # 检查超时
-                if self.timeout and timer.elapsed() > self.timeout * 1000:
-                    raise Exception(f"任务超时（{self.timeout}秒）")
-                self.signals.progress.emit(data)
-            
-            result = self.worker_fn(report_progress=report_progress)
-            
-            # 检查是否被取消
-            if self._is_cancelled:
-                self.signals.status_changed.emit(self.task_id, TaskStatus.CANCELLED)
-                logger.debug(f"[AsyncTask] 任务被取消: {self.task_id}")
-                return
-            
-            # 在主线程中发射完成信号
-            self.signals.finished.emit(result)
-            self.signals.status_changed.emit(self.task_id, TaskStatus.COMPLETED)
-            logger.debug(f"[AsyncTask] 完成: {self.task_id} (耗时: {timer.elapsed()/1000:.2f}秒)")
-            
+            result = self.work_func()
+            if self.on_finished:
+                self.on_finished(result)
         except Exception as e:
-            error_msg = f"{str(e)}\n{traceback.format_exc()}"
-            logger.error(f"[AsyncTask] 错误: {self.task_id} - {e}")
-            self.signals.error.emit(error_msg)
-            self.signals.status_changed.emit(self.task_id, TaskStatus.FAILED)
-    
-    def start(self):
-        """启动任务（提交到全局线程池）"""
-        QThreadPool.globalInstance().start(self)
-    
-    def cancel(self):
-        """取消任务"""
-        self._is_cancelled = True
-        logger.debug(f"[AsyncTask] 取消任务: {self.task_id}")
+            if self.on_error:
+                self.on_error(str(e))
 
 
 class WorkerThread(QThread):
     """
-    工作线程 - 基于 QThread
-    适用于长任务、需要状态管理的任务（如 OCR 识别、引擎初始化等）
+    工作线程基类 - 基于 QThread
+    适用于长任务、不可并发任务（如 OCR 识别、文件处理等）
     
-    使用示例:
-        class OcrWorker(WorkerThread):
-            progress = Signal(int, int, str)
-            finished = Signal(dict)
-            error = Signal(str)
-            
-            def run(self):
-                try:
-                    result = self.ocr_engine.recognize(self.image_path)
-                    self.finished.emit(result)
-                except Exception as e:
-                    self.error.emit(str(e))
-        
-        worker = OcrWorker(ocr_engine, image_path)
-        worker.finished.connect(on_finished)
-        worker.error.connect(on_error)
-        worker.start()
+    信号:
+        started_signal: 线程启动
+        finished: 任务完成
+        error: 任务出错
+        progress: 进度更新
+        status_changed: 状态变化
     """
     
-    # 通用信号
-    progress = Signal(object)  # 进度数据
-    finished = Signal(object)  # 结果
-    error = Signal(str)  # 错误信息
-    started_signal = Signal()  # 开始
-    status_changed = Signal(str, str)  # task_id, status
+    started_signal = Signal()
+    finished = Signal(object)  # result
+    error = Signal(str)  # error_message
+    progress = Signal(object)  # progress_data
+    status_changed = Signal(str, str)  # task_name, status
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self._is_running = False
-        self._task_name = "worker"
+        self._task_name = "unnamed_task"
         self._start_time = 0
     
     @property
-    def task_name(self) -> str:
+    def task_name(self):
         return self._task_name
     
     @task_name.setter
@@ -197,10 +121,10 @@ class WorkerThread(QThread):
             logger.debug(f"[WorkerThread] 完成: {self._task_name} (耗时: {elapsed:.2f}秒)")
             self.status_changed.emit(self._task_name, TaskStatus.COMPLETED)
         except Exception as e:
-            error_msg = f"{str(e)}\n{traceback.format_exc()}"
-            logger.error(f"[WorkerThread] 错误: {self._task_name} - {e}")
-            self.error.emit(error_msg)
+            elapsed = time.time() - self._start_time
+            logger.error(f"[WorkerThread] 错误: {self._task_name} (耗时: {elapsed:.2f}秒)", exc_info=True)
             self.status_changed.emit(self._task_name, TaskStatus.FAILED)
+            self.error.emit(str(e))
         finally:
             self._is_running = False
     
@@ -208,17 +132,21 @@ class WorkerThread(QThread):
         """子类应重写此方法"""
         pass
     
-    def stop(self):
-        """安全停止线程"""
+    def stop(self, wait_ms: int = 1000):
+        """安全停止线程
+        
+        Args:
+            wait_ms: 等待线程退出的最长毫秒数（0 = 仅发请求，不等待）
+                     建议传入正值让调用方确认线程已退出，避免僵尸线程。
+        """
         if self.isRunning():
             logger.debug(f"[WorkerThread] 停止: {self._task_name}")
             self.requestInterruption()
-            self.quit()
-            self.wait(5000)  # 等待最多 5 秒
-            if self.isRunning():
-                logger.warning(f"[WorkerThread] 强制停止: {self._task_name}")
-            else:
-                self.status_changed.emit(self._task_name, TaskStatus.CANCELLED)
+            if wait_ms > 0:
+                # 等待线程结束，但不阻塞太久
+                self.wait(wait_ms)
+        else:
+            logger.debug(f"[WorkerThread] 未运行，跳过停止: {self._task_name}")
     
     @property
     def is_running(self) -> bool:
@@ -230,47 +158,7 @@ class WorkerThread(QThread):
     
     def report_progress(self, data):
         """报告进度"""
-        if self.isInterruptionRequested():
-            raise Exception("任务已被中断")
         self.progress.emit(data)
-
-
-class OcrInitWorker(WorkerThread):
-    """
-    OCR 引擎初始化工作线程
-    用于异步初始化 OCR 引擎，避免阻塞 UI
-    """
-    
-    def __init__(self, ocr_engine, exe_path: str, models_path: str, language: str = "简体中文", parent=None):
-        super().__init__(parent)
-        self.ocr_engine = ocr_engine
-        self.exe_path = exe_path
-        self.models_path = models_path
-        self.language = language
-        self.task_name = "ocr_init"
-    
-    def do_work(self):
-        """执行 OCR 引擎初始化"""
-        try:
-            # 设置引擎路径
-            self.ocr_engine.exe_path = self.exe_path
-            self.ocr_engine.models_path = self.models_path
-            self.ocr_engine.language = self.language
-            
-            # 初始化引擎
-            success = self.ocr_engine.initialize()
-            
-            if success:
-                logger.info("[OcrInitWorker] OCR 引擎初始化成功")
-                self.finished.emit({"success": True, "message": "OCR 引擎初始化成功"})
-            else:
-                logger.error("[OcrInitWorker] OCR 引擎初始化失败")
-                self.finished.emit({"success": False, "message": "OCR 引擎初始化失败"})
-                
-        except Exception as e:
-            error_msg = f"OCR 引擎初始化异常: {str(e)}"
-            logger.error(f"[OcrInitWorker] {error_msg}", exc_info=True)
-            self.error.emit(error_msg)
 
 
 class OcrRecognizeWorker(WorkerThread):
@@ -279,12 +167,88 @@ class OcrRecognizeWorker(WorkerThread):
     用于异步执行单图 OCR 识别
     """
     
+    # 取消信号（与 BatchOcrWorker 保持一致）
+    cancelled = Signal()
+    
     def __init__(self, ocr_engine, image_path: str, config=None, parent=None):
         super().__init__(parent)
         self.ocr_engine = ocr_engine
         self.image_path = image_path
         self.config = config
         self.task_name = f"ocr_recognize_{os.path.basename(image_path)}"
+    
+    def do_work(self):
+        """执行单图 OCR 识别（支持超长图自动切片）"""
+        # 标记任务是否被中断
+        is_cancelled = False
+        
+        try:
+            # 进度回调函数
+            def progress_callback(current, total):
+                if self.is_interrupted():
+                    raise Exception("任务已被中断")
+                self.report_progress({
+                    "current": current,
+                    "total": total,
+                    "file_path": self.image_path,
+                    "filename": os.path.basename(self.image_path)
+                })
+            
+            # 中断检查函数
+            def is_interrupted():
+                return self.isInterruptionRequested()
+            
+            # 检查中断状态，确保在执行识别之前能够响应中断请求
+            if self.isInterruptionRequested():
+                logger.info("[OcrRecognizeWorker] 任务被中断")
+                is_cancelled = True
+                return
+            
+            # 传入配置对象、进度回调和中断检查函数
+            result = self.ocr_engine.recognize_auto(
+                self.image_path, 
+                config=self.config,
+                progress_callback=progress_callback,
+                is_interrupted=is_interrupted
+            )
+            
+            # 检查中断状态，确保在发送完成信号之前能够响应中断请求
+            if self.isInterruptionRequested():
+                logger.info("[OcrRecognizeWorker] 任务被中断，发送 cancelled 信号")
+                # 直接发送信号，Qt 会自动将信号传递到接收对象的线程
+                self.cancelled.emit()
+                return
+            
+            self.finished.emit(result)
+        except Exception as e:
+            error_msg = f"OCR 识别异常: {str(e)}"
+            # 检查是否是中断异常
+            if "中断" in str(e) or self.isInterruptionRequested():
+                logger.info(f"[OcrRecognizeWorker] 任务被中断: {error_msg}")
+                # 直接发送信号，Qt 会自动将信号传递到接收对象的线程
+                self.cancelled.emit()
+            else:
+                # 只有在线程未被中断时才发送错误信号
+                if not self.isInterruptionRequested():
+                    logger.error(f"[OcrRecognizeWorker] {error_msg}", exc_info=True)
+                    self.error.emit(error_msg)
+
+
+class APIBasedOcrRecognizeWorker(WorkerThread):
+    """
+    基于 CoreAPI 的 OCR 单图识别工作线程
+    用于异步执行单图 OCR 识别，使用 CoreAPI 进行错误处理
+    """
+    
+    # 取消信号（与 BatchOcrWorker 保持一致）
+    cancelled = Signal()
+    
+    def __init__(self, core_api, image_path: str, config=None, parent=None):
+        super().__init__(parent)
+        self.core_api = core_api
+        self.image_path = image_path
+        self.config = config
+        self.task_name = f"api_ocr_recognize_{os.path.basename(image_path)}"
     
     def do_work(self):
         """执行单图 OCR 识别（支持超长图自动切片）"""
@@ -300,17 +264,52 @@ class OcrRecognizeWorker(WorkerThread):
                     "filename": os.path.basename(self.image_path)
                 })
             
-            # 传入配置对象和进度回调，实现实时读取切片参数和进度反馈
-            result = self.ocr_engine.recognize_auto(
-                self.image_path, 
-                config=self.config,
-                progress_callback=progress_callback
+            # 中断检查函数
+            def is_interrupted():
+                return self.isInterruptionRequested()
+            
+            # 检查中断状态，确保在执行识别之前能够响应中断请求
+            if self.isInterruptionRequested():
+                logger.info("[APIBasedOcrRecognizeWorker] 任务被中断")
+                self.cancelled.emit()
+                return
+            
+            # 使用 CoreAPI 进行识别
+            result = self.core_api.recognize_single_image_async(
+                self.image_path,
+                progress_callback=progress_callback,
+                is_interrupted=is_interrupted
             )
-            self.finished.emit(result)
+            
+            # 检查中断状态，确保在发送完成信号之前能够响应中断请求
+            if self.isInterruptionRequested():
+                logger.info("[APIBasedOcrRecognizeWorker] 任务被中断，发送 cancelled 信号")
+                self.cancelled.emit()
+                return
+            
+            # 如果 CoreAPI 返回 ErrorResult，我们需要从中提取实际结果
+            if hasattr(result, 'success') and hasattr(result, 'data'):
+                if result.success:
+                    self.finished.emit(result.data)  # 发送实际数据
+                else:
+                    # 如果有错误，发送错误信号
+                    error_msg = result.error.message if result.error else "识别失败"
+                    self.error.emit(error_msg)
+            else:
+                # 兼容旧格式
+                self.finished.emit(result)
+                
         except Exception as e:
             error_msg = f"OCR 识别异常: {str(e)}"
-            logger.error(f"[OcrRecognizeWorker] {error_msg}", exc_info=True)
-            self.error.emit(error_msg)
+            # 检查是否是中断异常
+            if "中断" in str(e) or self.isInterruptionRequested():
+                logger.info(f"[APIBasedOcrRecognizeWorker] 任务被中断: {error_msg}")
+                self.cancelled.emit()
+            else:
+                # 只有在线程未被中断时才发送错误信号
+                if not self.isInterruptionRequested():
+                    logger.error(f"[APIBasedOcrRecognizeWorker] {error_msg}", exc_info=True)
+                    self.error.emit(error_msg)
 
 
 class BatchOcrWorker(WorkerThread):
@@ -318,6 +317,8 @@ class BatchOcrWorker(WorkerThread):
     批量 OCR 识别工作线程
     用于异步执行批量图片 OCR 识别
     """
+    # 额外信号：通知 UI 任务被用户取消（区别于 error）
+    cancelled = Signal()
     
     def __init__(self, ocr_engine, file_paths: list, config=None, parent=None):
         super().__init__(parent)
@@ -331,13 +332,21 @@ class BatchOcrWorker(WorkerThread):
         results = []
         total = len(self.file_paths)
         
-        for i, file_path in enumerate(self.file_paths):
-            # 检查是否被中断
-            if self.isInterruptionRequested():
-                logger.info("[BatchOcrWorker] 任务被中断")
-                break
-            
-            try:
+        # 检查初始中断状态
+        if self.isInterruptionRequested():
+            logger.info("[BatchOcrWorker] 启动前已被中断，发送取消信号")
+            self.cancelled.emit()
+            return
+        
+        try:
+            for i, file_path in enumerate(self.file_paths):
+                # ── Umi-OCR风格的中断检查点 ──────────────────────────
+                # ① 中断检查：如果标记为停止，直接退出循环
+                if self.isInterruptionRequested():
+                    logger.info("[BatchOcrWorker] 任务被中断，退出循环并清理")
+                    self.cancelled.emit()
+                    return
+                
                 # 发送进度更新
                 self.progress.emit({
                     "current": i + 1,
@@ -346,33 +355,153 @@ class BatchOcrWorker(WorkerThread):
                     "file_path": file_path
                 })
                 
-                # 执行识别（传入配置对象，实现实时读取切片参数）
-                result = self.ocr_engine.recognize_auto(file_path, config=self.config)
+                # ── 为当前文件建立闭包（避免 Python 循环变量捕获 Bug）──
+                def make_progress_callback(fp, idx):
+                    def progress_callback(current, total_slices):
+                        # 在进度回调中也检查中断状态
+                        if self.isInterruptionRequested():
+                            raise Exception("任务已被中断")
+                        self.report_progress({
+                            "current": current,
+                            "total": total_slices,
+                            "batch_current": idx + 1,
+                            "batch_total": total,
+                            "filename": os.path.basename(fp),
+                            "file_path": fp
+                        })
+                    return progress_callback
                 
-                # 添加文件信息
-                result["file_path"] = file_path
-                result["file_name"] = os.path.basename(file_path)
+                def make_is_interrupted():
+                    def is_interrupted():
+                        # 提供一个可调用的中断检查函数
+                        return self.isInterruptionRequested()
+                    return is_interrupted
                 
-                results.append(result)
+                progress_cb = make_progress_callback(file_path, i)
+                is_interrupted_fn = make_is_interrupted()
                 
-                # 发送单个完成信号
-                self.finished.emit({
-                    "index": i,
-                    "file_path": file_path,
-                    "result": result
-                })
-                
-            except Exception as e:
-                error_msg = f"文件 {os.path.basename(file_path)} 识别异常: {str(e)}"
-                logger.error(f"[BatchOcrWorker] {error_msg}", exc_info=True)
-                self.error.emit(error_msg)
+                try:
+                    # 执行单个文件的 OCR 识别
+                    result = self.ocr_engine.recognize_auto(
+                        file_path,
+                        config=self.config,
+                        progress_callback=progress_cb,
+                        is_interrupted=is_interrupted_fn
+                    )
+
+                    # ★★★ 关键：在任务完成后才检查中断状态 ★★★
+                    # PaddleOCR-json 管道模式不支持真正的优雅中断
+                    # 必须等待当前任务完成后才能处理中断
+                    if self.isInterruptionRequested():
+                        logger.info("[BatchOcrWorker] 当前任务完成后检测到中断，停止后续任务")
+                        # 不记录这个被取消的任务结果
+                        self.cancelled.emit()
+                        return
+
+                    # 任务正常完成，记录结果
+                    results.append({
+                        "file_path": file_path,
+                        "file_name": os.path.basename(file_path),
+                        "result": result
+                    })
+
+                    # 发送单个文件完成的进度更新
+                    self.progress.emit({
+                        "current": i + 1,
+                        "total": total,
+                        "filename": os.path.basename(file_path),
+                        "file_path": file_path,
+                        "completed": True,
+                        "result": result
+                    })
+                    
+                except Exception as e:
+                    error_msg = f"文件 {file_path} 识别失败: {str(e)}"
+                    logger.error(error_msg, exc_info=True)
+                    
+                    # 记录错误结果
+                    results.append({
+                        "file_path": file_path,
+                        "file_name": os.path.basename(file_path),
+                        "result": {
+                            "code": 999,
+                            "data": str(e),
+                            "texts": [],
+                            "boxes": []
+                        }
+                    })
+                    
+                    # 发送错误进度更新
+                    self.progress.emit({
+                        "current": i + 1,
+                        "total": total,
+                        "filename": os.path.basename(file_path),
+                        "file_path": file_path,
+                        "error": str(e)
+                    })
+                    
+                    # 即使单个文件出错，也继续处理下一个文件
+                    continue
         
-        # 发送全部完成信号
-        self.finished.emit({
-            "all_finished": True,
-            "results": results,
-            "total": total
-        })
+        except Exception as e:
+            # 整体错误处理
+            error_msg = f"批量 OCR 识别异常: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            if not self.isInterruptionRequested():
+                self.error.emit(error_msg)
+            return
+        
+        # 所有文件处理完成
+        logger.info(f"[BatchOcrWorker] 批量识别完成: {len(results)} 个文件")
+        self.finished.emit(results)
+
+
+class OcrInitWorker(WorkerThread):
+    """
+    OCR 引擎初始化工作线程
+    用于异步初始化 OCR 引擎
+    """
+    
+    def __init__(self, ocr_engine, exe_path: str, models_path: str, language: str, parent=None):
+        super().__init__(parent)
+        self.ocr_engine = ocr_engine
+        self.exe_path = exe_path
+        self.models_path = models_path
+        self.language = language
+        self.task_name = "ocr_init"
+    
+    def do_work(self):
+        """执行 OCR 引擎初始化"""
+        try:
+            # 设置 OCR 引擎参数
+            self.ocr_engine.exe_path = self.exe_path
+            self.ocr_engine.models_path = self.models_path
+            
+            # 验证路径
+            self.ocr_engine._validate_paths()
+            
+            # 设置语言
+            success = self.ocr_engine.set_language(self.language)
+            
+            if success:
+                # 初始化引擎
+                init_success = self.ocr_engine.initialize()
+                if init_success:
+                    logger.info(f"[OcrInitWorker] OCR 引擎初始化成功")
+                    self.finished.emit({"success": True, "message": "OCR 引擎初始化成功"})
+                else:
+                    error_msg = "OCR 引擎初始化失败"
+                    logger.error(f"[OcrInitWorker] {error_msg}")
+                    self.finished.emit({"success": False, "message": error_msg})
+            else:
+                error_msg = f"设置语言失败: {self.language}"
+                logger.error(f"[OcrInitWorker] {error_msg}")
+                self.finished.emit({"success": False, "message": error_msg})
+                
+        except Exception as e:
+            error_msg = f"OCR 引擎初始化异常: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            self.finished.emit({"success": False, "message": error_msg})
 
 
 class FolderScanWorker(WorkerThread):
@@ -385,57 +514,197 @@ class FolderScanWorker(WorkerThread):
         super().__init__(parent)
         self.folder_path = folder_path
         self.recursive = recursive
-        self.task_name = "folder_scan"
-        
-        # 支持的图片扩展名
-        self.IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp', '.tiff', '.tif'}
-    
-    def _is_image_file(self, file_path: str) -> bool:
-        """检查文件是否是图片"""
-        ext = os.path.splitext(file_path)[1].lower()
-        return ext in self.IMAGE_EXTENSIONS
+        self.task_name = f"folder_scan_{os.path.basename(folder_path)}"
     
     def do_work(self):
         """执行文件夹扫描"""
         try:
-            image_files = []
+            image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.gif', '.webp'}
+            file_paths = []
             
             if self.recursive:
-                # 递归扫描子目录
+                # 递归扫描
                 for root, dirs, files in os.walk(self.folder_path):
-                    if self.isInterruptionRequested():
-                        break
                     for file in files:
-                        file_path = os.path.join(root, file)
-                        if self._is_image_file(file_path):
-                            image_files.append(file_path)
+                        if os.path.splitext(file.lower())[1] in image_extensions:
+                            file_paths.append(os.path.join(root, file))
             else:
-                # 仅扫描当前目录
+                # 只扫描当前目录
                 for file in os.listdir(self.folder_path):
-                    if self.isInterruptionRequested():
-                        break
-                    file_path = os.path.join(self.folder_path, file)
-                    if os.path.isfile(file_path) and self._is_image_file(file_path):
-                        image_files.append(file_path)
+                    if os.path.isfile(os.path.join(self.folder_path, file)):
+                        if os.path.splitext(file.lower())[1] in image_extensions:
+                            file_paths.append(os.path.join(self.folder_path, file))
             
-            # 排序并返回
-            image_files = sorted(set(image_files))
+            # 按文件名排序
+            file_paths.sort()
             
-            self.progress.emit({
-                "scanning": False,
-                "count": len(image_files)
-            })
+            logger.info(f"[FolderScanWorker] 扫描完成，找到 {len(file_paths)} 个图片文件")
             
             self.finished.emit({
-                "folder_path": self.folder_path,
-                "image_files": image_files,
-                "count": len(image_files)
+                "image_files": file_paths,
+                "count": len(file_paths)
             })
             
         except Exception as e:
             error_msg = f"文件夹扫描异常: {str(e)}"
-            logger.error(f"[FolderScanWorker] {error_msg}", exc_info=True)
+            logger.error(error_msg, exc_info=True)
             self.error.emit(error_msg)
+
+
+class APIBasedBatchOcrWorker(WorkerThread):
+    """
+    基于 CoreAPI 的批量 OCR 识别工作线程
+    用于异步执行批量图片 OCR 识别，使用 CoreAPI 进行错误处理
+    """
+    # 额外信号：通知 UI 任务被用户取消（区别于 error）
+    cancelled = Signal()
+    
+    def __init__(self, core_api, file_paths: list, config=None, parent=None):
+        super().__init__(parent)
+        self.core_api = core_api
+        self.file_paths = file_paths
+        self.config = config
+        self.task_name = "api_batch_ocr"
+    
+    def do_work(self):
+        """执行批量 OCR 识别（支持超长图自动切片）"""
+        results = []
+        total = len(self.file_paths)
+        
+        # 检查初始中断状态
+        if self.isInterruptionRequested():
+            logger.info("[APIBasedBatchOcrWorker] 启动前已被中断，发送取消信号")
+            self.cancelled.emit()
+            return
+        
+        try:
+            for i, file_path in enumerate(self.file_paths):
+                # ── Umi-OCR风格的中断检查点 ──────────────────────────
+                # ① 中断检查：如果标记为停止，直接退出循环
+                if self.isInterruptionRequested():
+                    logger.info("[APIBasedBatchOcrWorker] 任务被中断，退出循环并清理")
+                    self.cancelled.emit()
+                    return
+                
+                # 发送进度更新
+                self.progress.emit({
+                    "current": i + 1,
+                    "total": total,
+                    "filename": os.path.basename(file_path),
+                    "file_path": file_path
+                })
+                
+                # ── 为当前文件建立闭包（避免 Python 循环变量捕获 Bug）──
+                def make_progress_callback(fp, idx):
+                    def progress_callback(current, total_slices):
+                        # 在进度回调中也检查中断状态
+                        if self.isInterruptionRequested():
+                            raise Exception("任务已被中断")
+                        self.report_progress({
+                            "current": current,
+                            "total": total_slices,
+                            "batch_current": idx + 1,
+                            "batch_total": total,
+                            "filename": os.path.basename(fp),
+                            "file_path": fp
+                        })
+                    return progress_callback
+                
+                def make_is_interrupted():
+                    def is_interrupted():
+                        # 提供一个可调用的中断检查函数
+                        return self.isInterruptionRequested()
+                    return is_interrupted
+                
+                progress_cb = make_progress_callback(file_path, i)
+                is_interrupted_fn = make_is_interrupted()
+                
+                try:
+                    # 使用 CoreAPI 进行单个文件识别
+                    result = self.core_api.recognize_single_image_async(
+                        file_path,
+                        progress_callback=progress_cb,
+                        is_interrupted=is_interrupted_fn
+                    )
+                    
+                    # 检查中断状态
+                    if self.isInterruptionRequested():
+                        logger.info("[APIBasedBatchOcrWorker] 任务被中断，退出循环并清理")
+                        self.cancelled.emit()
+                        return
+                    
+                    # 处理 CoreAPI 返回的结果
+                    if hasattr(result, 'success') and hasattr(result, 'data'):
+                        if result.success:
+                            final_result = result.data
+                        else:
+                            # 如果有错误，创建错误结果
+                            final_result = {
+                                "code": 999,
+                                "data": result.error.message if result.error else "识别失败",
+                                "texts": [],
+                                "boxes": []
+                            }
+                    else:
+                        # 兼容旧格式
+                        final_result = result
+                    
+                    # 记录单个结果
+                    results.append({
+                        "file_path": file_path,
+                        "file_name": os.path.basename(file_path),
+                        "result": final_result
+                    })
+                    
+                    # 发送单个文件完成的进度更新
+                    self.progress.emit({
+                        "current": i + 1,
+                        "total": total,
+                        "filename": os.path.basename(file_path),
+                        "file_path": file_path,
+                        "completed": True,
+                        "result": final_result
+                    })
+                    
+                except Exception as e:
+                    error_msg = f"文件 {file_path} 识别失败: {str(e)}"
+                    logger.error(error_msg, exc_info=True)
+                    
+                    # 记录错误结果
+                    results.append({
+                        "file_path": file_path,
+                        "file_name": os.path.basename(file_path),
+                        "result": {
+                            "code": 999,
+                            "data": str(e),
+                            "texts": [],
+                            "boxes": []
+                        }
+                    })
+                    
+                    # 发送错误进度更新
+                    self.progress.emit({
+                        "current": i + 1,
+                        "total": total,
+                        "filename": os.path.basename(file_path),
+                        "file_path": file_path,
+                        "error": str(e)
+                    })
+                    
+                    # 即使单个文件出错，也继续处理下一个文件
+                    continue
+        
+        except Exception as e:
+            # 整体错误处理
+            error_msg = f"批量 OCR 识别异常: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            if not self.isInterruptionRequested():
+                self.error.emit(error_msg)
+            return
+        
+        # 所有文件处理完成
+        logger.info(f"[APIBasedBatchOcrWorker] 批量识别完成: {len(results)} 个文件")
+        self.finished.emit(results)
 
 
 class ThumbnailLoadWorker(WorkerThread):
@@ -444,204 +713,120 @@ class ThumbnailLoadWorker(WorkerThread):
     用于异步加载图片缩略图
     """
     
-    def __init__(self, file_path: str, size: int = 60, parent=None):
+    def __init__(self, file_path: str, size: int = 48, parent=None):
         super().__init__(parent)
         self.file_path = file_path
         self.size = size
-        self.task_name = "thumbnail_load"
+        self.task_name = f"thumbnail_load_{os.path.basename(file_path)}"
     
     def do_work(self):
-        """加载缩略图"""
+        """执行缩略图加载"""
         try:
-            from PySide6.QtGui import QPixmap
-            from PySide6.QtCore import Qt
+            from PIL import Image
+            import base64
+            import io
             
-            pixmap = QPixmap(self.file_path)
-            if pixmap.isNull():
-                # 返回占位图
-                placeholder = QPixmap(self.size, self.size)
-                placeholder.fill(Qt.GlobalColor.lightGray)
-                self.finished.emit({
+            # 打开图片
+            with Image.open(self.file_path) as img:
+                # 计算缩放尺寸，保持宽高比
+                width, height = img.size
+                if width > height:
+                    new_width = self.size
+                    new_height = int(height * (self.size / width))
+                else:
+                    new_height = self.size
+                    new_width = int(width * (self.size / height))
+                
+                # 调整图片大小
+                resized_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                
+                # 转换为base64编码
+                buffer = io.BytesIO()
+                resized_img.save(buffer, format='PNG')
+                img_base64 = base64.b64encode(buffer.getvalue()).decode()
+                
+                result = {
+                    "success": True,
                     "file_path": self.file_path,
-                    "pixmap": placeholder,
-                    "success": False
-                })
-            else:
-                scaled_pixmap = pixmap.scaled(
-                    self.size, self.size,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-                self.finished.emit({
-                    "file_path": self.file_path,
-                    "pixmap": scaled_pixmap,
-                    "success": True
-                })
+                    "thumbnail_data": img_base64,
+                    "size": (new_width, new_height)
+                }
+                
+                logger.info(f"[ThumbnailLoadWorker] 缩略图加载完成: {self.file_path}")
+                self.finished.emit(result)
+                
         except Exception as e:
             error_msg = f"缩略图加载异常: {str(e)}"
-            logger.error(f"[ThumbnailLoadWorker] {error_msg}", exc_info=True)
-            self.error.emit(error_msg)
+            logger.error(error_msg, exc_info=True)
+            # 发送错误结果而不是错误信号，这样调用方可以统一处理
+            result = {
+                "success": False,
+                "file_path": self.file_path,
+                "error": str(e)
+            }
+            self.finished.emit(result)
 
 
-class ExportWorker(WorkerThread):
+class AsyncTaskManager:
     """
-    导出工作线程
-    用于异步导出识别结果
-    """
-    
-    def __init__(self, exporter, results, format_type: str, output_path: str, parent=None):
-        super().__init__(parent)
-        self.exporter = exporter
-        self.results = results
-        self.format_type = format_type
-        self.output_path = output_path
-        self.task_name = "export"
-    
-    def do_work(self):
-        """执行导出"""
-        try:
-            # 从完整路径中提取文件名和目录
-            output_dir = os.path.dirname(self.output_path)
-            filename_with_ext = os.path.basename(self.output_path)
-            filename_without_ext = os.path.splitext(filename_with_ext)[0]
-            
-            # 调用导出方法
-            result_path = self.exporter.export(
-                self.results,
-                self.format_type,
-                filename=filename_without_ext,
-                output_dir=output_dir if output_dir else None
-            )
-            
-            self.finished.emit({
-                "success": result_path is not None,
-                "format_type": self.format_type,
-                "output_path": result_path if result_path else self.output_path
-            })
-        except Exception as e:
-            error_msg = f"导出异常: {str(e)}"
-            logger.error(f"[ExportWorker] {error_msg}", exc_info=True)
-            self.error.emit(error_msg)
-
-
-class BatchExportWorker(WorkerThread):
-    """
-    批量导出工作线程
-    用于异步导出批量识别结果
+    异步任务管理器 - 管理多个 AsyncTask 的生命周期
+    适用于需要管理大量短期任务的场景
     """
     
-    def __init__(self, exporter, format_type: str, output_path: str, parent=None):
-        super().__init__(parent)
-        self.exporter = exporter
-        self.format_type = format_type
-        self.output_path = output_path
-        self.task_name = "batch_export"
-    
-    def do_work(self):
-        """执行批量导出"""
-        try:
-            # 根据格式类型调用不同的导出方法
-            result_path = None
-            if self.format_type.upper() == "TXT":
-                result_path = self.exporter.export_txt(self.output_path)
-            elif self.format_type.upper() == "JSON":
-                result_path = self.exporter.export_json(self.output_path)
-            elif self.format_type.upper() == "EXCEL":
-                result_path = self.exporter.export_excel(self.output_path)
-            
-            self.finished.emit({
-                "success": result_path is not None,
-                "format_type": self.format_type,
-                "output_path": result_path if result_path else self.output_path
-            })
-        except Exception as e:
-            error_msg = f"批量导出异常: {str(e)}"
-            logger.error(f"[BatchExportWorker] {error_msg}", exc_info=True)
-            self.error.emit(error_msg)
-
-
-class AsyncTaskManager(QObject):
-    """
-    异步任务管理器 - 管理所有后台任务
-    提供任务生命周期管理、取消、状态查询等功能
-    """
-    
-    # 全局信号
-    task_started = Signal(str)  # task_id
-    task_finished = Signal(str)  # task_id
-    task_error = Signal(str, str)  # task_id, error_message
-    task_status_changed = Signal(str, str)  # task_id, status
-    all_tasks_finished = Signal()
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        
-        # 跟踪所有运行中的线程
-        self._workers: Dict[str, WorkerThread] = {}
-        self._lock = None  # 延迟初始化
-        
-        # 配置线程池
-        self._configure_thread_pool()
-        
-        logger.info("[AsyncTaskManager] 初始化完成")
-    
-    def _configure_thread_pool(self):
-        """配置线程池"""
-        thread_pool = QThreadPool.globalInstance()
-        thread_pool.setMaxThreadCount(DEFAULT_THREAD_POOL_MAX_THREADS)
-        logger.info(f"[AsyncTaskManager] 线程池配置完成，最大线程数: {DEFAULT_THREAD_POOL_MAX_THREADS}")
+    def __init__(self):
+        self._workers = {}  # task_id -> worker
+        self._lock = threading.RLock()  # 线程安全锁
+        self._task_started_callbacks = []
+        self._task_finished_callbacks = []
+        self._task_error_callbacks = []
     
     def _get_lock(self):
-        """获取线程锁"""
-        if self._lock is None:
-            import threading
-            self._lock = threading.Lock()
         return self._lock
     
-    def start_worker(self, task_id: str, worker: WorkerThread):
-        """
-        启动工作线程
+    def register_callback(self, event_type: str, callback: Callable):
+        """注册回调函数
         
         Args:
-            task_id: 任务唯一标识
-            worker: 工作线程实例
+            event_type: 事件类型，可选值: 'started', 'finished', 'error'
+            callback: 回调函数
         """
-        worker.task_name = task_id
+        if event_type == 'started':
+            self._task_started_callbacks.append(callback)
+        elif event_type == 'finished':
+            self._task_finished_callbacks.append(callback)
+        elif event_type == 'error':
+            self._task_error_callbacks.append(callback)
+    
+    def submit_task(self, task: AsyncTask, task_id: Optional[str] = None) -> str:
+        """提交任务
         
-        # 连接信号
-        worker.finished.connect(lambda r: self._on_worker_finished(task_id, r))
-        worker.error.connect(lambda e: self._on_worker_error(task_id, e))
-        worker.status_changed.connect(self._on_worker_status_changed)
+        Args:
+            task: 任务对象
+            task_id: 任务ID，如果不提供则自动生成
+            
+        Returns:
+            任务ID
+        """
+        import threading
+        import uuid
+        
+        if not task_id:
+            task_id = str(uuid.uuid4())
         
         with self._get_lock():
-            # 如果已有同名任务在运行，先停止它
-            if task_id in self._workers:
-                old_worker = self._workers[task_id]
-                if old_worker.isRunning():
-                    old_worker.stop()
-                del self._workers[task_id]
-            
-            self._workers[task_id] = worker
+            self._workers[task_id] = task
         
-        self.task_started.emit(task_id)
-        worker.start()
-        logger.debug(f"[AsyncTaskManager] 启动任务: {task_id}")
-    
-    def start_async_task(self, task: AsyncTask):
-        """
-        启动异步任务（基于 QRunnable）
+        # 调用回调函数
+        for callback in self._task_started_callbacks:
+            try:
+                callback(task_id)
+            except Exception as e:
+                logger.error(f"任务开始回调执行失败: {e}")
         
-        Args:
-            task: AsyncTask 实例
-        """
-        # 连接信号
-        task.signals.status_changed.connect(self._on_worker_status_changed)
-        task.signals.finished.connect(lambda r: self._on_async_task_finished(task.task_id, r))
-        task.signals.error.connect(lambda e: self._on_async_task_error(task.task_id, e))
-        
-        self.task_started.emit(task.task_id)
         task.start()
-        logger.debug(f"[AsyncTaskManager] 启动异步任务: {task.task_id}")
+        logger.debug(f"[AsyncTaskManager] 启动异步任务: {task_id}")
+        
+        return task_id
     
     def stop_worker(self, task_id: str):
         """停止指定任务"""
@@ -663,92 +848,34 @@ class AsyncTaskManager(QObject):
         
         logger.info("[AsyncTaskManager] 已停止所有任务")
     
-    def is_running(self, task_id: str) -> bool:
-        """检查任务是否正在运行"""
-        with self._get_lock():
-            if task_id in self._workers:
-                return self._workers[task_id].isRunning()
-            return False
-    
-    def get_running_tasks(self) -> list:
-        """获取所有运行中的任务 ID"""
-        with self._get_lock():
-            return [tid for tid, w in self._workers.items() if w.isRunning()]
-    
-    def get_task_count(self) -> int:
-        """获取当前任务数量"""
-        with self._get_lock():
-            return len(self._workers)
-    
-    def _on_worker_finished(self, task_id: str, result):
-        """工作线程完成回调"""
-        with self._get_lock():
-            if task_id in self._workers:
-                del self._workers[task_id]
-        
-        self.task_finished.emit(task_id)
-        logger.debug(f"[AsyncTaskManager] 任务完成: {task_id}")
-        self._check_all_tasks_finished()
-    
-    def _on_worker_error(self, task_id: str, error_msg: str):
-        """工作线程错误回调"""
-        with self._get_lock():
-            if task_id in self._workers:
-                del self._workers[task_id]
-        
-        self.task_error.emit(task_id, error_msg)
-        logger.error(f"[AsyncTaskManager] 任务错误: {task_id} - {error_msg[:100]}")
-        self._check_all_tasks_finished()
-    
-    def _on_async_task_finished(self, task_id: str, result):
-        """异步任务完成回调"""
-        self.task_finished.emit(task_id)
-        logger.debug(f"[AsyncTaskManager] 异步任务完成: {task_id}")
-        self._check_all_tasks_finished()
-    
-    def _on_async_task_error(self, task_id: str, error_msg: str):
-        """异步任务错误回调"""
-        self.task_error.emit(task_id, error_msg)
-        logger.error(f"[AsyncTaskManager] 异步任务错误: {task_id} - {error_msg[:100]}")
-        self._check_all_tasks_finished()
-    
-    def _on_worker_status_changed(self, task_id: str, status: str):
-        """任务状态变更回调"""
-        self.task_status_changed.emit(task_id, status)
-        logger.debug(f"[AsyncTaskManager] 任务状态变更: {task_id} -> {status}")
-    
-    def _check_all_tasks_finished(self):
-        """检查是否所有任务都已完成"""
-        with self._get_lock():
-            if len(self._workers) == 0:
-                self.all_tasks_finished.emit()
-                logger.debug("[AsyncTaskManager] 所有任务已完成")
-    
     def cleanup(self):
-        """清理资源"""
+        """清理所有资源"""
         self.stop_all()
-        # 清理线程池
-        thread_pool = QThreadPool.globalInstance()
-        thread_pool.clear()
-        logger.info("[AsyncTaskManager] 清理完成")
+
+
+# 全局线程池
+_thread_pool = None
+
+
+def get_thread_pool():
+    """获取全局线程池"""
+    global _thread_pool
+    if _thread_pool is None:
+        from PySide6.QtCore import QThreadPool
+        _thread_pool = QThreadPool.globalInstance()
+        _thread_pool.setMaxThreadCount(DEFAULT_THREAD_POOL_MAX_THREADS)
+        logger.info(f"[ThreadPool] 初始化，最大线程数: {_thread_pool.maxThreadCount()}")
+    return _thread_pool
 
 
 # 全局任务管理器实例
-_async_task_manager: Optional[AsyncTaskManager] = None
+_task_manager_instance = None
 
-
-def get_task_manager() -> AsyncTaskManager:
-    """获取全局任务管理器"""
-    global _async_task_manager
-    if _async_task_manager is None:
-        _async_task_manager = AsyncTaskManager()
-    return _async_task_manager
-
-
-def reset_task_manager() -> AsyncTaskManager:
-    """重置任务管理器"""
-    global _async_task_manager
-    if _async_task_manager:
-        _async_task_manager.cleanup()
-    _async_task_manager = AsyncTaskManager()
-    return _async_task_manager
+def get_task_manager():
+    """获取任务管理器"""
+    global _task_manager_instance
+    if _task_manager_instance is None:
+        # 直接创建 AsyncTaskManager 实例，不进行线程检查
+        # 这样可以确保在 QApplication 尚未创建时也能正常工作
+        _task_manager_instance = AsyncTaskManager()
+    return _task_manager_instance

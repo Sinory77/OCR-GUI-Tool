@@ -19,6 +19,7 @@ import os
 import logging
 from core.config import DEFAULT_OCR_EXE, DEFAULT_MODELS_PATH
 from core.error_handler import ConfigError, handle_error, error_handling, ErrorType
+from interfaces.fluent.ui_config import UIConfigManager
 
 
 logger = logging.getLogger(__name__)
@@ -123,16 +124,16 @@ class OcrEngineSettingCard(ExpandGroupSettingCard):
     def _init_controls(self):
         """初始化控件"""
         from qfluentwidgets import PushButton, SwitchButton
-        from core.config import get_config_manager
+        from api.core_api import get_core_api
 
-        # 获取核心层配置管理器
-        self.config = get_config_manager()
+        # 获取核心API
+        self.api = get_core_api()
 
         # 自动搜索开关 - 从配置读取初始状态
         # 如果 OCR 引擎或模型目录未配置，强制为 False
-        exe_path = self.config.get_ocr_exe_path()
-        models_path = self.config.get_models_path()
-        auto_detect = self.config.get_auto_detect()
+        exe_path = self.api.get_config("ocr_exe_path")
+        models_path = self.api.get_config("models_path")
+        auto_detect = self.api.get_config("auto_detect", False)
 
         if not exe_path or not models_path:
             auto_detect = False
@@ -163,7 +164,7 @@ class OcrEngineSettingCard(ExpandGroupSettingCard):
         from qfluentwidgets import Slider
         self.slider = Slider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, 100)
-        self.slider.setValue(self.config.get_confidence_threshold())
+        self.slider.setValue(self.api.get_config("confidence_threshold", 50))
         self.slider.setFixedWidth(150)
 
         self.confidenceLabel = BodyLabel(str(self.slider.value()))
@@ -198,13 +199,13 @@ class OcrEngineSettingCard(ExpandGroupSettingCard):
         self.exePathGroup = self.addGroup(
             FluentIcon.FOLDER,
             "OCR 引擎路径",
-            self.config.get_ocr_exe_path() or "未配置",
+            self.api.get_config("ocr_exe_path") or "未配置",
             self.exePathButton
         )
         self.modelsPathGroup =         self.addGroup(
             FluentIcon.FOLDER,
             "OCR 模型路径",
-            self.config.get_models_path() or "未配置",
+            self.api.get_config("models_path") or "未配置",
             self.modelsPathButton
         )
         self.addGroup(
@@ -268,7 +269,7 @@ class OcrEngineSettingCard(ExpandGroupSettingCard):
             self._start_detect_thread()
         else:
             # 关闭开关 → 恢复手动子项
-            self.config.set_auto_detect(False)  # 保存开关状态
+            self.api.set_config("auto_detect", False)  # 保存开关状态
             self.autoDetectGroup.contentLabel.setText(
                 "开启后在程序目录中自动搜索 PaddleOCR-json.exe 和 models"
             )
@@ -420,10 +421,10 @@ class OcrEngineSettingCard(ExpandGroupSettingCard):
             # 由于ConfigManager没有reset_config方法，我们手动重置每个配置项
             self.config.set_ocr_exe_path(DEFAULT_OCR_EXE)
             self.config.set_models_path(DEFAULT_MODELS_PATH)
-            self.config.set_language("简体中文")
-            self.config.set_ui_language("中文")
-            self.config.set_auto_copy(False)
-            self.config.set_theme("跟随系统")
+            self.api.set_config("language", "简体中文")
+            self.ui_config.set_ui_language("中文")
+            self.ui_config.set_auto_copy(False)
+            self.ui_config.set_theme("跟随系统")
             self.config.set_confidence_threshold(50)
             self.config.set_auto_detect(False)
             self.config.set_long_image_mode(True)
@@ -490,6 +491,7 @@ class SettingsPage(ScrollArea):
         """初始化所有设置"""
         from core.config import get_config_manager
         self.config = get_config_manager()
+        self.ui_config = UIConfigManager()
 
         # 设置标题（放在 scrollWidget 内部）
         self.settingLabel = SubtitleLabel("设置", self.scrollWidget)
@@ -539,7 +541,7 @@ class SettingsPage(ScrollArea):
             content="识别成功后自动复制到剪贴板",
             parent=self.ocr_group
         )
-        self.auto_copy_card.switchButton.setChecked(self.config.get_auto_copy())
+        self.auto_copy_card.switchButton.setChecked(self.ui_config.get_auto_copy())
         self.auto_copy_card.switchButton.checkedChanged.connect(self._on_auto_copy_changed)
         self.ocr_group.addSettingCard(self.auto_copy_card)
 
@@ -599,6 +601,29 @@ class SettingsPage(ScrollArea):
         self.display_limit_card.spin_box.valueChanged.connect(self._on_display_limit_changed)
         self.ocr_group.addSettingCard(self.display_limit_card)
 
+        # ── 去重设置 ──
+        # 文件去重开关
+        self.file_dedup_card = SwitchSettingCard(
+            icon=FluentIcon.FILTER,
+            title="识别前文件去重",
+            content="自动跳过相同内容的图片文件（基于 MD5 哈希）",
+            parent=self.ocr_group
+        )
+        self.file_dedup_card.switchButton.setChecked(self.config.get_file_dedup_enabled())
+        self.file_dedup_card.switchButton.checkedChanged.connect(self._on_file_dedup_changed)
+        self.ocr_group.addSettingCard(self.file_dedup_card)
+
+        # 内容去重开关
+        self.text_dedup_card = SwitchSettingCard(
+            icon=FluentIcon.DICTIONARY,
+            title="识别后内容去重",
+            content="自动跳过相同识别结果的图片（基于 SimHash 精确匹配）",
+            parent=self.ocr_group
+        )
+        self.text_dedup_card.switchButton.setChecked(self.config.get_text_dedup_enabled())
+        self.text_dedup_card.switchButton.checkedChanged.connect(self._on_text_dedup_changed)
+        self.ocr_group.addSettingCard(self.text_dedup_card)
+
     def add_ui_cards(self):
         """添加个性化设置卡片"""
         # 主题设置 - OptionsSettingCard
@@ -614,7 +639,7 @@ class SettingsPage(ScrollArea):
         
         # 界面语言设置 - OptionsSettingCard
         # 从配置中获取当前界面语言
-        current_ui_language = self.config.get_ui_language()
+        current_ui_language = self.ui_config.get_ui_language()
         # 创建一个临时的OptionsConfigItem用于OptionsSettingCard
         ui_language_config = OptionsConfigItem(
             group="Interface",
@@ -758,8 +783,8 @@ class SettingsPage(ScrollArea):
         }
         if theme in theme_map:
             setTheme(theme_map[theme])
-            # 保存到核心层
-            self.config.set_theme(theme)
+            # 保存到界面配置层
+            self.ui_config.set_theme(theme)
             InfoBar.success(
                 title="设置已保存",
                 content=f"界面主题: {theme}",
@@ -772,8 +797,8 @@ class SettingsPage(ScrollArea):
         # 确保language是字符串
         if hasattr(language, 'value'):
             language = language.value
-        # 保存到核心层
-        self.config.set_ui_language(language)
+        # 保存到界面配置层
+        self.ui_config.set_ui_language(language)
         InfoBar.success(
             title="设置已保存",
             content=f"界面语言: {language}",
@@ -789,8 +814,8 @@ class SettingsPage(ScrollArea):
         )
 
     def _on_auto_copy_changed(self, checked):
-        """自动复制设置变化 - 核心层处理"""
-        self.config.set_auto_copy(checked)
+        """自动复制设置变化 - 界面层处理"""
+        self.ui_config.set_auto_copy(checked)
 
     def _on_scan_subdirs_changed(self, checked: bool):
         """扫描子目录开关变化 - 核心层处理"""
@@ -819,6 +844,28 @@ class SettingsPage(ScrollArea):
         InfoBar.success(
             title="设置已保存",
             content=f"历史记录显示上限: {value} 条",
+            position=InfoBarPosition.TOP,
+            parent=self
+        )
+
+    def _on_file_dedup_changed(self, enabled: bool):
+        """文件去重开关变化"""
+        self.config.set_file_dedup_enabled(enabled)
+        status = "已开启" if enabled else "已关闭"
+        InfoBar.success(
+            title="设置已保存",
+            content=f"识别前文件去重：{status}",
+            position=InfoBarPosition.TOP,
+            parent=self
+        )
+
+    def _on_text_dedup_changed(self, enabled: bool):
+        """内容去重开关变化"""
+        self.config.set_text_dedup_enabled(enabled)
+        status = "已开启" if enabled else "已关闭"
+        InfoBar.success(
+            title="设置已保存",
+            content=f"识别后内容去重：{status}",
             position=InfoBarPosition.TOP,
             parent=self
         )

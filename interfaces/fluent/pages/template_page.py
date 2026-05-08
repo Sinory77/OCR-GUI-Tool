@@ -22,13 +22,162 @@ from qfluentwidgets import (
     ComboBox, TableWidget, CardWidget, InfoBar, InfoBarPosition,
     MessageBoxBase, FluentIcon as FIF, CheckBox, SearchLineEdit,
     ToolButton, TransparentToolButton, StrongBodyLabel,
-    PillPushButton, setFont
+    PillPushButton, setFont, TogglePushButton
 )
 from qfluentwidgets import MessageBox
 from ..ui_utils import create_message_box, setup_chinese_buttons
 
 from core.template_manager import get_template_manager, ParseTemplate, ParseRule
 from core.text_parser import TextParser
+from api.core_api import CoreAPI
+
+
+# ──────────────────────────────────────────────────────────────
+# 历史选择对话框
+# ──────────────────────────────────────────────────────────────
+
+class HistorySelectDialog(MessageBoxBase):
+    """历史选择对话框 - 从识别历史中选择测试文本"""
+
+    def __init__(self, parent=None):
+        self.selected_text = None
+        self.selected_filename = None
+        super().__init__(parent)
+        # 设置中文按钮
+        setup_chinese_buttons(self)
+        self._setup_ui()
+        self._load_history()
+
+    def _setup_ui(self):
+        """设置 UI"""
+        self.titleLabel = SubtitleLabel("📜 选择识别历史", self)
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.setSpacing(12)
+
+        # 搜索框
+        self.search_input = SearchLineEdit(self)
+        self.search_input.setPlaceholderText("搜索文件名...")
+        self.search_input.textChanged.connect(self._on_search)
+        self.viewLayout.addWidget(self.search_input)
+
+        # 历史列表
+        self.history_table = TableWidget(self)
+        self.history_table.setColumnCount(3)
+        self.history_table.setHorizontalHeaderLabels(["文件名", "时间", "预览"])
+        self.history_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.history_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.history_table.setMinimumHeight(250)
+        self.history_table.itemDoubleClicked.connect(self._on_select)
+        self.history_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.history_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.history_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.viewLayout.addWidget(self.history_table)
+
+        # 提示
+        hint = CaptionLabel("💡 双击行或点击确定选择", self)
+        hint.setStyleSheet("color: gray;")
+        self.viewLayout.addWidget(hint)
+
+        # 窗口尺寸
+        self.widget.setMinimumWidth(500)
+
+    def _load_history(self):
+        """加载历史记录"""
+        try:
+            api = CoreAPI()
+            history = api.get_history_results(limit=100)
+
+            self.all_history = history
+            self._display_history(history)
+        except Exception as e:
+            self.history_table.setRowCount(1)
+            self.history_table.setItem(0, 0, QTableWidgetItem(f"加载失败: {str(e)}"))
+
+    def _display_history(self, history):
+        """显示历史记录"""
+        self.history_table.setRowCount(len(history))
+        for i, item in enumerate(history):
+            # 文件名
+            filename = item.get('filename', '未知')
+            self.history_table.setItem(i, 0, QTableWidgetItem(filename))
+
+            # 时间
+            time_str = item.get('time', '')[:19] if item.get('time') else ''
+            self.history_table.setItem(i, 1, QTableWidgetItem(time_str))
+
+            # 预览（文本前50字）
+            text = item.get('text', '')
+            preview = text[:50] + '...' if len(text) > 50 else text
+            preview_item = QTableWidgetItem(preview)
+            preview_item.setForeground(Qt.gray)
+            self.history_table.setItem(i, 2, preview_item)
+
+            # 保存完整文本
+            self.history_table.item(i, 0).setData(Qt.UserRole, text)
+            self.history_table.item(i, 0).setToolTip(text)
+
+    def _on_search(self, text: str):
+        """搜索过滤"""
+        if not text.strip():
+            self._display_history(self.all_history)
+            return
+
+        filtered = [h for h in self.all_history
+                   if text.lower() in h.get('filename', '').lower()
+                   or text.lower() in h.get('text', '').lower()]
+        self._display_history(filtered)
+
+    def _on_select(self, item):
+        """选择历史项"""
+        row = item.row()
+        self.selected_text = self.history_table.item(row, 0).data(Qt.UserRole)
+        self.selected_filename = self.history_table.item(row, 0).text()
+        self.accept()
+
+    def get_selected(self):
+        """获取选中的内容"""
+        return self.selected_text, self.selected_filename
+
+
+# ──────────────────────────────────────────────────────────────
+# 导入选项对话框
+# ──────────────────────────────────────────────────────────────
+
+class ImportOptionsDialog(MessageBoxBase):
+    """导入选项对话框 - 处理模板名称冲突"""
+
+    def __init__(self, template_name: str, parent=None):
+        self.template_name = template_name
+        super().__init__(parent)
+        # 设置中文按钮
+        setup_chinese_buttons(self)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        """设置 UI"""
+        self.titleLabel = SubtitleLabel("模板冲突", self)
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.setSpacing(12)
+
+        # 提示信息
+        hint_text = f"已存在模板「{self.template_name}」，请选择处理方式："
+        hint_label = BodyLabel(hint_text, self)
+        self.viewLayout.addWidget(hint_label)
+
+        # 选项
+        self.option_combo = ComboBox(self)
+        self.option_combo.addItem("🔄 覆盖现有模板", "overwrite")
+        self.option_combo.addItem("📝 重命名为新模板", "rename")
+        self.option_combo.addItem("❌ 取消导入", "cancel")
+        self.option_combo.setCurrentIndex(0)
+        self.viewLayout.addWidget(self.option_combo)
+
+        # 窗口尺寸
+        self.widget.setMinimumWidth(400)
+
+    def get_option(self) -> str:
+        """获取选择的选项"""
+        return self.option_combo.currentData()
 
 
 # ──────────────────────────────────────────────────────────────
@@ -623,6 +772,15 @@ class TemplatePage(ScrollArea):
         self.btn_export.clicked.connect(self._on_export_template)
         btn_layout.addWidget(self.btn_export)
 
+        self.btn_export_all = PushButton(FIF.SAVE, "批量导出", list_card)
+        self.btn_export_all.clicked.connect(self._on_export_all_templates)
+        btn_layout.addWidget(self.btn_export_all)
+
+        self.btn_duplicate = PushButton(FIF.COPY, "复制模板", list_card)
+        self.btn_duplicate.setEnabled(False)
+        self.btn_duplicate.clicked.connect(self._on_duplicate_template)
+        btn_layout.addWidget(self.btn_duplicate)
+
         btn_layout.addStretch()
 
         self.btn_refresh = TransparentToolButton(FIF.SYNC, list_card)
@@ -633,7 +791,7 @@ class TemplatePage(ScrollArea):
         list_card_layout.addLayout(btn_layout)
         self.main_layout.addWidget(list_card)
 
-        # ── 预览测试卡片 ──
+        # ── 预览测试卡片（可折叠）──
         preview_card = CardWidget(self.scrollWidget)
         preview_layout = QVBoxLayout(preview_card)
         preview_layout.setContentsMargins(16, 16, 16, 16)
@@ -641,39 +799,60 @@ class TemplatePage(ScrollArea):
 
         # 卡片标题行
         preview_title_row = QHBoxLayout()
-        preview_title_row.addWidget(StrongBodyLabel("🧪 模板预览测试", preview_card))
-        
+        self.preview_toggle = TogglePushButton("🧪 模板预览测试", preview_card)
+        self.preview_toggle.setChecked(True)
+        self.preview_toggle.setText("🧪 模板预览测试 ▲")
+        self.preview_toggle.setToolTip("点击折叠/展开预览测试区域")
+        self.preview_toggle.clicked.connect(self._on_preview_toggle)
+        preview_title_row.addWidget(self.preview_toggle)
+
         # 当前选中模板显示
         self.current_template_label = BodyLabel("（未选择模板）", preview_card)
         self.current_template_label.setStyleSheet("color: gray; font-style: italic;")
         preview_title_row.addWidget(self.current_template_label)
-        
-        # 测试按钮放到标题行右侧，更靠近操作区域
+
+        # 测试按钮放到标题行右侧
         self.btn_test = PrimaryPushButton(FIF.SEARCH, "测试解析", preview_card)
         self.btn_test.clicked.connect(self._on_test_parse)
         preview_title_row.addWidget(self.btn_test)
-        
+
         preview_title_row.addStretch()
         preview_layout.addLayout(preview_title_row)
+
+        # 可折叠的内容区域
+        self.preview_content_widget = QWidget(preview_card)
+        self.preview_content_layout = QVBoxLayout(self.preview_content_widget)
+        self.preview_content_layout.setContentsMargins(0, 0, 0, 0)
+        self.preview_content_layout.setSpacing(12)
+        preview_layout.addWidget(self.preview_content_widget)
 
         # 输入区域 - 左右布局
         input_row = QHBoxLayout()
         input_row.setSpacing(16)
-        
+
         # 左侧：测试输入
         input_group = QVBoxLayout()
         input_group.setSpacing(6)
-        input_group.addWidget(CaptionLabel("测试文本：", preview_card))
+
+        # 输入区标题行
+        input_header = QHBoxLayout()
+        input_header.addWidget(CaptionLabel("测试文本："))
+        input_header.addStretch()
+        self.btn_from_history = PushButton(FIF.HISTORY, "从历史选择", preview_card)
+        self.btn_from_history.clicked.connect(self._on_select_from_history)
+        input_header.addWidget(self.btn_from_history)
+        input_group.addLayout(input_header)
+
         self.test_text = TextEdit(preview_card)
         self.test_text.setPlaceholderText("在此粘贴需要解析的文本内容...\n\n例如：\n货主：张三\n联系电话：13800138000")
         self.test_text.setMinimumHeight(120)
         input_group.addWidget(self.test_text)
         input_row.addLayout(input_group, 1)
-        
+
         # 右侧：解析结果
         result_group = QVBoxLayout()
         result_group.setSpacing(6)
-        
+
         result_header = QHBoxLayout()
         result_header.addWidget(CaptionLabel("解析结果：", preview_card))
         self.result_count_label = BodyLabel("", preview_card)
@@ -681,80 +860,124 @@ class TemplatePage(ScrollArea):
         result_header.addWidget(self.result_count_label)
         result_header.addStretch()
         result_group.addLayout(result_header)
-        
+
         self.test_result = TableWidget(preview_card)
         self.test_result.setColumnCount(2)
         self.test_result.setHorizontalHeaderLabels(["字段", "值"])
-        
+
         result_header_widget = self.test_result.horizontalHeader()
         result_header_widget.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         result_header_widget.setSectionResizeMode(1, QHeaderView.Stretch)
-        
+
         self.test_result.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.test_result.setMinimumHeight(120)
         result_group.addWidget(self.test_result)
         input_row.addLayout(result_group, 1)
-        
-        preview_layout.addLayout(input_row)
-        
+
+        self.preview_content_layout.addLayout(input_row)
+
         # ── 正则表达式测试功能 ──
         regex_test_group = QVBoxLayout()
         regex_test_group.setSpacing(6)
         regex_test_group.addWidget(CaptionLabel("🔍 正则表达式测试：", preview_card))
-        
+
         # 正则输入和测试按钮
         regex_input_row = QHBoxLayout()
         self.regex_input = LineEdit(preview_card)
         self.regex_input.setPlaceholderText(r"输入正则表达式，例如：联系电话[：:]\s*(\d+)")
         self.regex_input.setClearButtonEnabled(True)
+        self.regex_input.textChanged.connect(self._on_regex_changed)
         regex_input_row.addWidget(self.regex_input, 1)
-        
+
         self.regex_test_button = PushButton(FIF.SEARCH, "测试", preview_card)
         self.regex_test_button.setFixedWidth(80)
+        self.regex_test_button.clicked.connect(self._on_regex_test)
         regex_input_row.addWidget(self.regex_test_button)
         regex_test_group.addLayout(regex_input_row)
-        
+
+        # 正则验证状态标签
+        self.regex_status_label = BodyLabel("", preview_card)
+        self.regex_status_label.setStyleSheet("color: gray;")
+        regex_test_group.addWidget(self.regex_status_label)
+
         # 正则测试结果
         self.regex_result = TextEdit(preview_card)
         self.regex_result.setReadOnly(True)
-        self.regex_result.setPlaceholderText("测试结果将显示在这里...")
+        self.regex_result.setPlaceholderText("输入正则表达式后，匹配结果将实时显示在这里...")
         self.regex_result.setMinimumHeight(80)
         regex_test_group.addWidget(self.regex_result)
-        preview_layout.addLayout(regex_test_group)
-        
+        self.preview_content_layout.addLayout(regex_test_group)
+
         # ── 关键词搜索功能 ──
         keyword_test_group = QVBoxLayout()
         keyword_test_group.setSpacing(6)
-        keyword_test_group.addWidget(CaptionLabel("🔑 关键词搜索测试：", preview_card))
-        
+
+        # 关键词标题行
+        keyword_header = QHBoxLayout()
+        keyword_header.addWidget(CaptionLabel("🔑 关键词搜索测试："))
+        keyword_header.addStretch()
+        self.btn_suggest_keywords = PushButton(FIF.DICTIONARY_ADD, "智能生成", preview_card)
+        self.btn_suggest_keywords.clicked.connect(self._on_suggest_keywords)
+        keyword_header.addWidget(self.btn_suggest_keywords)
+        keyword_test_group.addLayout(keyword_header)
+
         # 关键词输入和测试按钮
         keyword_input_row = QHBoxLayout()
         self.keyword_input = LineEdit(preview_card)
         self.keyword_input.setPlaceholderText("输入关键词，例如：货主")
         self.keyword_input.setClearButtonEnabled(True)
+        self.keyword_input.textChanged.connect(self._on_keyword_changed)
         keyword_input_row.addWidget(self.keyword_input, 1)
-        
+
         self.keyword_test_button = PushButton(FIF.SEARCH, "测试", preview_card)
         self.keyword_test_button.setFixedWidth(80)
+        self.keyword_test_button.clicked.connect(self._on_keyword_test)
         keyword_input_row.addWidget(self.keyword_test_button)
         keyword_test_group.addLayout(keyword_input_row)
-        
+
+        # 关键词建议列表
+        self.keyword_suggestions = BodyLabel("", preview_card)
+        self.keyword_suggestions.setStyleSheet("color: #666;")
+        self.keyword_suggestions.setWordWrap(True)
+        keyword_test_group.addWidget(self.keyword_suggestions)
+
         # 关键词测试结果
         self.keyword_result = TextEdit(preview_card)
         self.keyword_result.setReadOnly(True)
-        self.keyword_result.setPlaceholderText("测试结果将显示在这里...")
+        self.keyword_result.setPlaceholderText("输入关键词后，匹配结果将显示在这里...")
         self.keyword_result.setMinimumHeight(80)
         keyword_test_group.addWidget(self.keyword_result)
-        preview_layout.addLayout(keyword_test_group)
-        
+        self.preview_content_layout.addLayout(keyword_test_group)
+
         # ── 添加到模板按钮 ──
         self.add_to_template_button = PrimaryPushButton(FIF.ADD, "添加测试规则到模板", preview_card)
         self.add_to_template_button.setEnabled(False)
-        preview_layout.addWidget(self.add_to_template_button)
-        
+        self.preview_content_layout.addWidget(self.add_to_template_button)
+
         self.main_layout.addWidget(preview_card)
-    
+
     # ── 模板列表操作 ──────────────────────────────────────────
+
+    def _on_preview_toggle(self):
+        """预览区折叠/展开切换"""
+        is_expanded = self.preview_toggle.isChecked()
+        self.preview_content_widget.setVisible(is_expanded)
+        self.preview_toggle.setText("🧪 模板预览测试 " + ("▲" if is_expanded else "▼"))
+
+    def _on_select_from_history(self):
+        """从识别历史选择"""
+        dialog = HistorySelectDialog(self)
+        if dialog.exec():
+            text, filename = dialog.get_selected()
+            if text:
+                self.test_text.setPlainText(text)
+                InfoBar.success(
+                    title="已加载",
+                    content=f"已从「{filename}」加载识别内容",
+                    position=InfoBarPosition.TOP,
+                    parent=self,
+                    duration=2000
+                )
 
     def _load_templates(self, templates=None):
         """加载模板到表格
@@ -772,9 +995,15 @@ class TemplatePage(ScrollArea):
             name_item.setData(Qt.UserRole, tpl.id)
             self.template_table.setItem(i, 0, name_item)
             
-            # 描述
+            # 描述（限制显示长度）
             desc_text = tpl.description if tpl.description else "-"
-            desc_item = QTableWidgetItem(desc_text)
+            if len(desc_text) > 30:
+                display_text = desc_text[:27] + "..."
+                desc_item = QTableWidgetItem(display_text)
+                desc_item.setToolTip(desc_text)  # 完整内容显示在 tooltip
+            else:
+                desc_item = QTableWidgetItem(desc_text)
+                desc_item.setToolTip(desc_text)
             desc_item.setForeground(Qt.gray)
             self.template_table.setItem(i, 1, desc_item)
             
@@ -810,6 +1039,7 @@ class TemplatePage(ScrollArea):
         self.btn_edit.setEnabled(has_selection)
         self.btn_delete.setEnabled(has_selection)
         self.btn_export.setEnabled(has_selection)
+        self.btn_duplicate.setEnabled(has_selection)
         
         # 更新当前选中模板显示
         if template_id:
@@ -922,23 +1152,83 @@ class TemplatePage(ScrollArea):
             "",
             "JSON 文件 (*.json);;所有文件 (*)"
         )
-        
+
         if not file_path:
             return
-        
-        success, message = self.template_manager.import_template(file_path)
-        if success:
+
+        try:
+            import json
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            # 判断是单个模板还是多个模板
+            if isinstance(data, dict):
+                templates_to_import = [data]
+            elif isinstance(data, list):
+                templates_to_import = data
+            else:
+                raise ValueError("不支持的文件格式")
+
+            imported_count = 0
+            skipped_count = 0
+
+            for tpl_data in templates_to_import:
+                # 检查是否已存在同名模板
+                existing = self.template_manager.search_templates(tpl_data.get('name', ''))
+                if existing:
+                    dialog = ImportOptionsDialog(tpl_data.get('name', ''), self)
+                    if dialog.exec():
+                        option = dialog.get_option()
+                        if option == "cancel":
+                            skipped_count += 1
+                            continue
+                        elif option == "overwrite":
+                            # 找到同名模板并更新
+                            for ex in existing:
+                                if ex.name == tpl_data.get('name'):
+                                    ex.description = tpl_data.get('description', '')
+                                    ex.rules = [ParseRule(**r) for r in tpl_data.get('rules', [])]
+                                    self.template_manager.save_template(ex)
+                                    imported_count += 1
+                                    break
+                        elif option == "rename":
+                            tpl_data['name'] = f"{tpl_data.get('name', '模板')} (导入)"
+                            new_tpl = ParseTemplate(**tpl_data)
+                            if self.template_manager.save_template(new_tpl):
+                                imported_count += 1
+                else:
+                    new_tpl = ParseTemplate(**tpl_data)
+                    if self.template_manager.save_template(new_tpl):
+                        imported_count += 1
+
             self._load_templates()
-            InfoBar.success(
-                title="导入成功",
-                content=message,
-                position=InfoBarPosition.TOP,
-                parent=self
-            )
-        else:
+
+            if imported_count > 0:
+                InfoBar.success(
+                    title="导入完成",
+                    content=f"成功导入 {imported_count} 个模板" + (f"，跳过 {skipped_count} 个" if skipped_count > 0 else ""),
+                    position=InfoBarPosition.TOP,
+                    parent=self
+                )
+            elif skipped_count > 0:
+                InfoBar.warning(
+                    title="导入取消",
+                    content=f"跳过了 {skipped_count} 个已存在的模板",
+                    position=InfoBarPosition.TOP,
+                    parent=self
+                )
+            else:
+                InfoBar.warning(
+                    title="导入结果",
+                    content="没有导入任何模板",
+                    position=InfoBarPosition.TOP,
+                    parent=self
+                )
+
+        except Exception as e:
             InfoBar.error(
                 title="导入失败",
-                content=message,
+                content=f"导入失败: {str(e)}",
                 position=InfoBarPosition.TOP,
                 parent=self
             )
@@ -978,6 +1268,290 @@ class TemplatePage(ScrollArea):
                 position=InfoBarPosition.TOP,
                 parent=self
             )
+
+    def _on_export_all_templates(self):
+        """批量导出所有模板"""
+        templates = self.template_manager.get_all_templates()
+        if not templates:
+            InfoBar.warning(
+                title="提示",
+                content="没有模板可导出",
+                position=InfoBarPosition.TOP,
+                parent=self
+            )
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "批量导出模板",
+            "templates_backup.json",
+            "JSON 文件 (*.json);;所有文件 (*)"
+        )
+
+        if not file_path:
+            return
+
+        try:
+            import json
+            templates_data = [tpl.to_dict() for tpl in templates]
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(templates_data, f, ensure_ascii=False, indent=2)
+
+            InfoBar.success(
+                title="导出成功",
+                content=f"已导出 {len(templates)} 个模板到: {file_path}",
+                position=InfoBarPosition.TOP,
+                parent=self
+            )
+        except Exception as e:
+            InfoBar.error(
+                title="导出失败",
+                content=f"导出失败: {str(e)}",
+                position=InfoBarPosition.TOP,
+                parent=self
+            )
+
+    def _on_duplicate_template(self):
+        """复制模板"""
+        template_id = self._get_selected_template_id()
+        if not template_id:
+            return
+
+        template = self.template_manager.get_template(template_id)
+        if not template:
+            InfoBar.error(title="错误", content="模板不存在", parent=self)
+            return
+
+        # 创建副本
+        new_template = ParseTemplate(
+            name=f"{template.name} (副本)",
+            description=template.description
+        )
+        new_template.rules = [ParseRule(**rule.to_dict()) for rule in template.rules]
+
+        # 保存
+        if self.template_manager.save_template(new_template):
+            self._load_templates()
+            InfoBar.success(
+                title="复制成功",
+                content=f"模板「{new_template.name}」已创建",
+                position=InfoBarPosition.TOP,
+                parent=self
+            )
+        else:
+            InfoBar.error(
+                title="复制失败",
+                content="保存模板失败",
+                position=InfoBarPosition.TOP,
+                parent=self
+            )
+
+    # ── 正则表达式实时验证 ────────────────────────────────────
+
+    def _on_regex_changed(self, text: str):
+        """正则表达式输入变化时实时验证"""
+        import re
+
+        if not text.strip():
+            self.regex_status_label.setText("")
+            self.regex_result.setPlainText("")
+            return
+
+        # 验证正则语法
+        try:
+            pattern = re.compile(text)
+            self.regex_status_label.setText("✅ 正则语法正确")
+            self.regex_status_label.setStyleSheet("color: green;")
+        except re.error as e:
+            self.regex_status_label.setText(f"❌ 语法错误: {str(e)}")
+            self.regex_status_label.setStyleSheet("color: red;")
+            return
+
+        # 如果有测试文本，实时显示匹配结果
+        test_text = self.test_text.toPlainText().strip()
+        if test_text:
+            try:
+                matches = pattern.findall(test_text)
+                if matches:
+                    result_lines = [f"匹配结果 ({len(matches)} 个)："]
+                    for i, match in enumerate(matches[:10], 1):
+                        match_str = str(match) if isinstance(match, str) else ', '.join(match) if isinstance(match, tuple) else str(match)
+                        result_lines.append(f"  {i}. {match_str}")
+                    if len(matches) > 10:
+                        result_lines.append(f"  ... 还有 {len(matches) - 10} 个匹配")
+                    self.regex_result.setPlainText('\n'.join(result_lines))
+                    self.add_to_template_button.setEnabled(True)
+                else:
+                    self.regex_result.setPlainText("无匹配结果")
+                    self.add_to_template_button.setEnabled(False)
+            except Exception as e:
+                self.regex_result.setPlainText(f"匹配失败: {str(e)}")
+
+    def _on_regex_test(self):
+        """手动测试正则表达式"""
+        text = self.test_text.toPlainText().strip()
+        regex_pattern = self.regex_input.text().strip()
+
+        if not text:
+            InfoBar.warning(title="提示", content="请先输入测试文本", parent=self)
+            return
+
+        if not regex_pattern:
+            InfoBar.warning(title="提示", content="请输入正则表达式", parent=self)
+            return
+
+        import re
+        try:
+            pattern = re.compile(regex_pattern)
+            matches = pattern.findall(text)
+
+            if matches:
+                result_text = f"匹配结果 ({len(matches)} 个)：\n"
+                for i, match in enumerate(matches, 1):
+                    match_str = str(match) if isinstance(match, str) else ', '.join(match) if isinstance(match, tuple) else str(match)
+                    result_text += f"  {i}. {match_str}\n"
+                self.regex_result.setPlainText(result_text)
+                self.add_to_template_button.setEnabled(True)
+            else:
+                self.regex_result.setPlainText("无匹配结果")
+                self.add_to_template_button.setEnabled(False)
+
+        except re.error as e:
+            InfoBar.error(title="正则错误", content=f"正则表达式语法错误: {str(e)}", parent=self)
+
+    # ── 关键词智能生成 ─────────────────────────────────────────
+
+    def _on_suggest_keywords(self):
+        """分析测试文本生成关键词建议"""
+        text = self.test_text.toPlainText().strip()
+        if not text:
+            InfoBar.warning(title="提示", content="请先输入测试文本", parent=self)
+            return
+
+        suggestions = self._extract_keywords(text)
+        if suggestions:
+            # 显示建议列表
+            suggestion_text = "💡 建议关键词：" + " | ".join([f"「{kw}」" for kw in suggestions])
+            self.keyword_suggestions.setText(suggestion_text)
+
+            # 询问是否自动填入第一个建议
+            dialog = MessageBox("关键词建议", f"发现以下可能的关键词：\n\n" + "\n".join([f"  • {kw}" for kw in suggestions]) + "\n\n是否使用第一个关键词？", self)
+            setup_chinese_buttons(dialog)
+            if dialog.exec():
+                self.keyword_input.setText(suggestions[0])
+                self._on_keyword_changed(suggestions[0])
+        else:
+            self.keyword_suggestions.setText("")
+            InfoBar.warning(title="提示", content="未发现明显的关键词模式", parent=self)
+
+    def _extract_keywords(self, text: str) -> list:
+        """从文本中提取可能的关键词
+
+        分析模式：
+        1. 冒号/等号前的标签（如 "姓名："）
+        2. 常见字段名（电话、地址、账号等）
+        3. 数字/特殊格式前的前缀
+        """
+        import re
+        suggestions = []
+        seen = set()
+
+        # 常见字段名模式
+        common_fields = [
+            '姓名', '名字', '名称', '货主', '发货人', '收货人', '客户',
+            '电话', '手机', '联系电话', '号码', 'TEL', 'Phone',
+            '地址', '收货地址', '发货地址', '地址：', 'Addr',
+            '账号', '卡号', '账户', 'Account',
+            '单号', '订单号', '运单号', '快递单号', '单号：',
+            '金额', '价格', '总计', '运费', '付款',
+            '日期', '时间', '下单时间', '发货时间',
+            '备注', '备注：', '说明',
+            '重量', '件数', '数量', '规格',
+            '公司', '单位', '部门',
+            '省份', '城市', '区域', '邮编',
+        ]
+
+        for field in common_fields:
+            if field.lower() in text.lower():
+                if field not in seen:
+                    suggestions.append(field)
+                    seen.add(field.lower())
+
+        # 提取 "标签：" 或 "标签：" 模式
+        label_pattern = re.compile(r'^([\u4e00-\u9fa5a-zA-Z]{1,10})[：:]\s*', re.MULTILINE)
+        for match in label_pattern.finditer(text):
+            label = match.group(1).strip()
+            if len(label) >= 2 and label not in seen and label.lower() not in [s.lower() for s in suggestions]:
+                suggestions.append(label)
+                seen.add(label.lower())
+
+        # 提取 "标签 值" 模式（如 "联系人 李四"）
+        contact_pattern = re.compile(r'^([\u4e00-\u9fa5]{2,4})\s+([\u4e00-\u9fa5a-zA-Z0-9]{2,15})$', re.MULTILINE)
+        for match in contact_pattern.finditer(text):
+            label = match.group(1)
+            if label not in seen and len(label) >= 2:
+                suggestions.append(label)
+                seen.add(label.lower())
+
+        return suggestions[:10]  # 最多返回10个
+
+    def _on_keyword_changed(self, text: str):
+        """关键词输入变化时实时匹配"""
+        test_text = self.test_text.toPlainText().strip()
+        if not text.strip() or not test_text:
+            self.keyword_result.setPlainText("")
+            self.add_to_template_button.setEnabled(
+                bool(self.regex_input.text().strip()) or bool(self.keyword_input.text().strip())
+            )
+            return
+
+        lines = test_text.split('\n')
+        matches = []
+
+        for i, line in enumerate(lines, 1):
+            if text in line:
+                matches.append((i, line.strip()))
+
+        if matches:
+            result_text = f"匹配结果 ({len(matches)} 个)：\n"
+            for line_num, line_content in matches[:20]:
+                result_text += f"  行{line_num}: {line_content}\n"
+            if len(matches) > 20:
+                result_text += f"  ... 还有 {len(matches) - 20} 个匹配"
+            self.keyword_result.setPlainText(result_text)
+            self.add_to_template_button.setEnabled(True)
+        else:
+            self.keyword_result.setPlainText("无匹配结果")
+
+    def _on_keyword_test(self):
+        """手动测试关键词搜索"""
+        text = self.test_text.toPlainText().strip()
+        keyword = self.keyword_input.text().strip()
+
+        if not text:
+            InfoBar.warning(title="提示", content="请先输入测试文本", parent=self)
+            return
+
+        if not keyword:
+            InfoBar.warning(title="提示", content="请输入关键词", parent=self)
+            return
+
+        lines = text.split('\n')
+        matches = []
+
+        for i, line in enumerate(lines, 1):
+            if keyword in line:
+                matches.append((i, line.strip()))
+
+        if matches:
+            result_text = f"匹配结果 ({len(matches)} 个)：\n"
+            for line_num, line_content in matches:
+                result_text += f"  行{line_num}: {line_content}\n"
+            self.keyword_result.setPlainText(result_text)
+            self.add_to_template_button.setEnabled(True)
+        else:
+            self.keyword_result.setPlainText("无匹配结果")
+            self.add_to_template_button.setEnabled(False)
 
     # ── 测试解析 ──────────────────────────────────────────────
 
@@ -1022,14 +1596,18 @@ class TemplatePage(ScrollArea):
             
             for i, (field, value) in enumerate(result.items()):
                 field_item = QTableWidgetItem(field)
-                
+
                 if value:
                     value_item = QTableWidgetItem(value)
                     success_count += 1
                 else:
                     value_item = QTableWidgetItem("(未提取到)")
+                    # 设置灰色斜体样式
                     value_item.setForeground(Qt.gray)
-                
+                    font = value_item.font()
+                    font.setItalic(True)
+                    value_item.setFont(font)
+
                 self.test_result.setItem(i, 0, field_item)
                 self.test_result.setItem(i, 1, value_item)
             
@@ -1066,115 +1644,7 @@ class TemplatePage(ScrollArea):
                 position=InfoBarPosition.TOP,
                 parent=self
             )
-    
-    def _on_regex_test(self):
-        """测试正则表达式"""
-        import re
-        text = self.test_text.toPlainText().strip()
-        regex_pattern = self.regex_input.text().strip()
-        
-        if not text:
-            InfoBar.warning(
-                title="提示", 
-                content="请先输入测试文本",
-                position=InfoBarPosition.TOP, 
-                parent=self
-            )
-            return
-        
-        if not regex_pattern:
-            InfoBar.warning(
-                title="提示", 
-                content="请输入正则表达式",
-                position=InfoBarPosition.TOP, 
-                parent=self
-            )
-            return
-        
-        try:
-            pattern = re.compile(regex_pattern)
-            matches = pattern.findall(text)
-            
-            if matches:
-                result_text = "匹配结果：\n"
-                for i, match in enumerate(matches, 1):
-                    result_text += f"{i}. {match}\n"
-                self.regex_result.setText(result_text)
-                self.add_to_template_button.setEnabled(True)
-                InfoBar.success(
-                    title="测试成功",
-                    content=f"找到 {len(matches)} 个匹配项",
-                    position=InfoBarPosition.TOP,
-                    parent=self
-                )
-            else:
-                self.regex_result.setText("没有找到匹配项")
-                InfoBar.warning(
-                    title="测试结果",
-                    content="没有找到匹配项",
-                    position=InfoBarPosition.TOP,
-                    parent=self
-                )
-        except re.error as e:
-            self.regex_result.setText(f"正则表达式错误: {str(e)}")
-            InfoBar.error(
-                title="正则错误",
-                content=f"正则表达式语法错误: {str(e)}",
-                position=InfoBarPosition.TOP,
-                parent=self
-            )
-    
-    def _on_keyword_test(self):
-        """测试关键词搜索"""
-        text = self.test_text.toPlainText().strip()
-        keyword = self.keyword_input.text().strip()
-        
-        if not text:
-            InfoBar.warning(
-                title="提示", 
-                content="请先输入测试文本",
-                position=InfoBarPosition.TOP, 
-                parent=self
-            )
-            return
-        
-        if not keyword:
-            InfoBar.warning(
-                title="提示", 
-                content="请输入关键词",
-                position=InfoBarPosition.TOP, 
-                parent=self
-            )
-            return
-        
-        lines = text.split('\n')
-        matches = []
-        
-        for i, line in enumerate(lines, 1):
-            if keyword in line:
-                matches.append((i, line.strip()))
-        
-        if matches:
-            result_text = "匹配结果：\n"
-            for line_num, line_content in matches:
-                result_text += f"行 {line_num}: {line_content}\n"
-            self.keyword_result.setText(result_text)
-            self.add_to_template_button.setEnabled(True)
-            InfoBar.success(
-                title="测试成功",
-                content=f"找到 {len(matches)} 个匹配项",
-                position=InfoBarPosition.TOP,
-                parent=self
-            )
-        else:
-            self.keyword_result.setText("没有找到匹配项")
-            InfoBar.warning(
-                title="测试结果",
-                content="没有找到匹配项",
-                position=InfoBarPosition.TOP,
-                parent=self
-            )
-    
+
     def _on_add_to_template(self):
         """添加测试规则到模板"""
         template_id = self._get_selected_template_id()
@@ -1227,188 +1697,15 @@ class TemplatePage(ScrollArea):
             template.rules.append(edited_rule)
             if self.template_manager.save_template(template):
                 InfoBar.success(
-                    title="成功", 
+                    title="成功",
                     content=f"规则 '{edited_rule.name}' 已添加到模板",
-                    position=InfoBarPosition.TOP, 
-                    parent=self
-                )
-            else:
-                InfoBar.error(
-                    title="错误", 
-                    content="保存模板失败",
-                    position=InfoBarPosition.TOP, 
-                    parent=self
-                )
-    
-    def _on_regex_test(self):
-        """测试正则表达式"""
-        import re
-        text = self.test_text.toPlainText().strip()
-        regex_pattern = self.regex_input.text().strip()
-        
-        if not text:
-            InfoBar.warning(
-                title="提示", 
-                content="请先输入测试文本",
-                position=InfoBarPosition.TOP, 
-                parent=self
-            )
-            return
-        
-        if not regex_pattern:
-            InfoBar.warning(
-                title="提示", 
-                content="请输入正则表达式",
-                position=InfoBarPosition.TOP, 
-                parent=self
-            )
-            return
-        
-        try:
-            pattern = re.compile(regex_pattern)
-            matches = pattern.findall(text)
-            
-            if matches:
-                result_text = "匹配结果：\n"
-                for i, match in enumerate(matches, 1):
-                    result_text += f"{i}. {match}\n"
-                self.regex_result.setText(result_text)
-                self.add_to_template_button.setEnabled(True)
-                InfoBar.success(
-                    title="测试成功",
-                    content=f"找到 {len(matches)} 个匹配项",
                     position=InfoBarPosition.TOP,
                     parent=self
                 )
             else:
-                self.regex_result.setText("没有找到匹配项")
-                InfoBar.warning(
-                    title="测试结果",
-                    content="没有找到匹配项",
-                    position=InfoBarPosition.TOP,
-                    parent=self
-                )
-        except re.error as e:
-            self.regex_result.setText(f"正则表达式错误: {str(e)}")
-            InfoBar.error(
-                title="正则错误",
-                content=f"正则表达式语法错误: {str(e)}",
-                position=InfoBarPosition.TOP,
-                parent=self
-            )
-    
-    def _on_keyword_test(self):
-        """测试关键词搜索"""
-        text = self.test_text.toPlainText().strip()
-        keyword = self.keyword_input.text().strip()
-        
-        if not text:
-            InfoBar.warning(
-                title="提示", 
-                content="请先输入测试文本",
-                position=InfoBarPosition.TOP, 
-                parent=self
-            )
-            return
-        
-        if not keyword:
-            InfoBar.warning(
-                title="提示", 
-                content="请输入关键词",
-                position=InfoBarPosition.TOP, 
-                parent=self
-            )
-            return
-        
-        lines = text.split('\n')
-        matches = []
-        
-        for i, line in enumerate(lines, 1):
-            if keyword in line:
-                matches.append((i, line.strip()))
-        
-        if matches:
-            result_text = "匹配结果：\n"
-            for line_num, line_content in matches:
-                result_text += f"行 {line_num}: {line_content}\n"
-            self.keyword_result.setText(result_text)
-            self.add_to_template_button.setEnabled(True)
-            InfoBar.success(
-                title="测试成功",
-                content=f"找到 {len(matches)} 个匹配项",
-                position=InfoBarPosition.TOP,
-                parent=self
-            )
-        else:
-            self.keyword_result.setText("没有找到匹配项")
-            InfoBar.warning(
-                title="测试结果",
-                content="没有找到匹配项",
-                position=InfoBarPosition.TOP,
-                parent=self
-            )
-    
-    def _on_add_to_template(self):
-        """添加测试规则到模板"""
-        template_id = self._get_selected_template_id()
-        if not template_id:
-            InfoBar.warning(
-                title="提示", 
-                content="请先选择一个模板",
-                position=InfoBarPosition.TOP, 
-                parent=self
-            )
-            return
-        
-        template = self.template_manager.get_template(template_id)
-        if not template:
-            InfoBar.error(
-                title="错误", 
-                content="模板不存在",
-                position=InfoBarPosition.TOP, 
-                parent=self
-            )
-            return
-        
-        # 检查是否有测试结果
-        regex_pattern = self.regex_input.text().strip()
-        keyword = self.keyword_input.text().strip()
-        
-        if not regex_pattern and not keyword:
-            InfoBar.warning(
-                title="提示", 
-                content="请先进行正则或关键词测试",
-                position=InfoBarPosition.TOP, 
-                parent=self
-            )
-            return
-        
-        # 创建规则
-        if regex_pattern:
-            rule = ParseRule(name="正则规则", type="regex", pattern=regex_pattern)
-        else:
-            rule = ParseRule(name="关键词规则", type="keyword", keyword=keyword)
-        
-        # 打开规则编辑对话框，让用户完善规则
-        dialog = RuleEditDialog(rule=rule, parent=self)
-        if dialog.exec():
-            edited_rule = dialog.get_rule()
-            if not edited_rule.name:
-                InfoBar.warning(title="提示", content="字段名称不能为空", parent=self)
-                return
-            
-            template.rules.append(edited_rule)
-            if self.template_manager.save_template(template):
-                InfoBar.success(
-                    title="成功", 
-                    content=f"规则 '{edited_rule.name}' 已添加到模板",
-                    position=InfoBarPosition.TOP, 
-                    parent=self
-                )
-            else:
                 InfoBar.error(
-                    title="错误", 
+                    title="错误",
                     content="保存模板失败",
-                    position=InfoBarPosition.TOP, 
+                    position=InfoBarPosition.TOP,
                     parent=self
                 )

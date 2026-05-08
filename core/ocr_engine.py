@@ -4,10 +4,13 @@
 
 import sys
 import os
+import time
 import subprocess
 import tempfile
 import logging
 import hashlib
+import threading
+import queue
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Callable, Any, Set
 
@@ -27,7 +30,7 @@ from .config import DEFAULT_OCR_EXE, DEFAULT_MODELS_PATH, DEFAULT_ARGS, LANGUAGE
 
 from .error_handler import OCREngineError, handle_error, error_handling, ErrorType
 
-# 状态码说明（官方文档）
+# 状态码说明（官方文档 + 自定义）
 OCR_CODES = {
     100: "识别成功",
     101: "未识别到文字",
@@ -38,6 +41,8 @@ OCR_CODES = {
     902: "子进程崩溃或连接失败",
     903: "读取输出失败",
     904: "JSON反序列化失败",
+    998: "引擎内部错误或子进程异常",
+    999: "未知错误",
 }
 
 
@@ -96,6 +101,17 @@ class OCREngine:
         if not Path(self.models_path).exists():
             logger.warning(f"模型路径不存在: {self.models_path}")
     
+    def check_config(self) -> bool:
+        """检查 OCR 引擎配置是否完整有效"""
+        try:
+            # 检查必需的路径是否存在
+            exe_exists = Path(self.exe_path).exists() if self.exe_path else False
+            models_exist = Path(self.models_path).exists() if self.models_path else False
+            
+            return exe_exists and models_exist
+        except Exception:
+            return False
+    
     def _cleanup_residual_processes(self) -> None:
         """清理残留的 PaddleOCR 进程
         
@@ -152,6 +168,171 @@ class OCREngine:
             return False
         return self.ocr.ret.poll() is None  # None = 进程仍在运行
     
+    def _ensure_engine_ready(self) -> bool:
+        """确保引擎处于可用状态
+        
+        检查引擎状态，如果子进程已损坏则重新初始化。
+        这对于快速中断-重新识别场景很重要。
+        
+        Returns:
+            引擎是否可用
+        """
+        if not self._initialized:
+            return self.initialize()
+        
+        # 检查子进程是否还活着
+        if not self._is_process_alive():
+            logger.info("[OCR] 检测到子进程已损坏，准备重新初始化...")
+            self._initialized = False
+            self.ocr = None
+            return self.initialize()
+        
+        return True
+    
+    def _terminate_ocr_process(self):
+        """处理 OCR 子进程异常（超时或崩溃）
+
+        注意：本方法不会强制杀死进程！
+        - 超时：只标记引擎需要重新初始化，不杀死子进程
+        - 进程崩溃：子进程已退出，无需处理
+
+        为什么不杀死进程？
+        - PaddleOCR-json 管道模式是顺序处理的，杀进程可能影响其他任务
+        - 下次识别时会检查子进程状态，如果崩溃会自动重新初始化
+        """
+        logger.warning("[OCR] OCR 子进程异常，标记引擎需要重新初始化")
+        if self.ocr and hasattr(self.ocr, 'ret') and self.ocr.ret:
+            try:
+                proc = self.ocr.ret
+                if proc.poll() is None:  # 进程还在运行
+                    # 进程还在运行，不杀死它
+                    # 只断开引用，让下次识别时重新初始化
+                    logger.info("[OCR] 子进程仍在运行，不强制终止，将在下次识别时重新初始化")
+            except Exception as e:
+                logger.warning(f"[OCR] 检查子进程状态时出错: {e}")
+
+        # 标记引擎需要重新初始化
+        self._initialized = False
+        self.ocr = None
+    
+    def _request_cancel(self):
+        """请求取消识别（优雅取消）
+        
+        设置取消标志，让当前任务完成后自动停止后续任务。
+        不会终止子进程，引擎可以继续使用。
+        """
+        logger.info("[OCR] 请求优雅取消识别")
+        self._force_cancel = True
+    
+    def _check_cancel(self) -> bool:
+        """检查是否请求了取消
+        
+        Returns:
+            True 表示需要取消，False 表示继续
+        """
+        return getattr(self, '_force_cancel', False)
+    
+    def _run_with_interrupt_check(
+        self,
+        image_path: str,
+        is_interrupted: Optional[Callable[[], bool]] = None,
+        poll_interval: float = 0.1,
+        timeout: float = 120.0,
+    ) -> Dict[str, Any]:
+        """在守护子线程里执行 ocr.run()，主线程通过 queue.get(timeout) 等待结果。
+
+        优雅中断机制（PaddleOCR-json 管道模式专用）：
+        - PaddleOCR-json 管道模式是同步阻塞的，子进程顺序处理任务
+        - 没有官方的优雅中断接口，只能等待子进程完成当前任务
+        - 检测到中断后，等待当前任务完成，然后返回取消结果
+        - 不杀死子进程，引擎可以继续使用
+
+        Args:
+            image_path:     要识别的图片路径
+            is_interrupted: 中断检查回调，返回 True 表示需要中断
+            poll_interval:  阻塞等待的超时时间（秒），每次超时即检查 is_interrupted
+            timeout:        单张图片最长等待秒数，超时视为引擎故障
+
+        Returns:
+            正常时返回 OCR 识别结果字典
+            取消时返回 {"code": 100, "data": [...], "texts": [...], "success": True, "cancelled": True}
+            超时时返回 {"code": 999, "data": "...", "success": False}
+            异常时抛出 OCREngineError
+
+        Raises:
+            OCREngineError: 引擎超时或进程异常
+        """
+        result_queue: queue.Queue = queue.Queue()
+
+        def _worker():
+            try:
+                logger.debug(f"[OCR] 守护线程开始执行 ocr.run({os.path.basename(image_path)})")
+                res = self.ocr.run(image_path)
+                logger.debug(f"[OCR] 守护线程 ocr.run() 返回，code={res.get('code')}")
+                result_queue.put(("ok", res))
+            except Exception as exc:
+                logger.debug(f"[OCR] 守护线程异常: {exc}")
+                result_queue.put(("err", exc))
+
+        t = threading.Thread(target=_worker, daemon=True, name=f"OCR-daemon-{os.path.basename(image_path)}")
+        t.start()
+        logger.debug(f"[OCR] 守护线程已启动，线程ID={t.ident}")
+
+        start_time = time.time()
+        was_interrupted = False  # 记录是否曾经被中断
+
+        while True:
+            # 注意：不在这里检查中断！
+            # PaddleOCR-json 管道模式不支持真正的优雅中断
+            # 如果在这里检查并立即返回，子进程仍在处理，导致：
+            # 1. 子进程被占用，无法处理新任务
+            # 2. 用户快速启动新识别时会失败
+            # 所以必须等待当前任务完成
+
+            # 阻塞等待结果，最长等待 poll_interval 秒
+            try:
+                status, payload = result_queue.get(timeout=poll_interval)
+                if status == "ok":
+                    logger.debug("[OCR] 收到识别结果")
+
+                    # ★★★ 关键：任务完成后才检查中断标志 ★★★
+                    # 这样子进程已经完成当前任务，可以继续处理新任务
+                    try:
+                        if is_interrupted and is_interrupted():
+                            was_interrupted = True
+                            logger.info("[OCR] 任务完成后检测到中断请求，标记为取消")
+                    except Exception as e:
+                        logger.warning(f"[OCR] 中断检查异常: {e}")
+
+                    if was_interrupted:
+                        # 任务被取消，但仍然返回结果（子进程已完成）
+                        # 标记为 cancelled，让调用方决定如何处理
+                        payload["cancelled"] = True
+                        return payload
+                    else:
+                        return payload
+                else:
+                    logger.debug("[OCR] 收到守护线程异常，重新抛出")
+                    raise payload
+            except queue.Empty:
+                # 超时，检查总超时
+                elapsed = time.time() - start_time
+
+                # 检查中断标志（只在超时时检查，不主动中断）
+                try:
+                    if is_interrupted and is_interrupted():
+                        was_interrupted = True
+                        logger.info("[OCR] 超时检测到中断请求，继续等待任务完成")
+                        # 不立即返回，继续等待子进程完成
+                except Exception as e:
+                    logger.warning(f"[OCR] 中断检查异常: {e}")
+
+                if elapsed >= timeout:
+                    logger.error(f"[OCR] 超时 {timeout}s")
+                    # 超时不算子进程崩溃，只是任务太慢
+                    # 不杀死子进程，只返回超时错误
+                    raise OCREngineError(f"OCR 引擎处理超时（>{timeout}s）")
+
     @staticmethod
     def get_code_message(code: int) -> str:
         """获取状态码说明
@@ -270,12 +451,13 @@ class OCREngine:
         logger.debug(f"[OCR] 更新缓存，当前缓存大小: {len(_ocr_cache)}")
     
     @error_handling(ErrorType.OCR_ENGINE, "OCR 识别失败")
-    def recognize(self, image_path: str) -> Dict[str, Any]:
+    def recognize(self, image_path: str, is_interrupted: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
         """
         识别图片中的文字
         
         Args:
             image_path: 图片路径
+            is_interrupted: 中断检查函数，返回 True 表示需要中断
             
         Returns:
             识别结果 {"code": int, "data": list/str, "texts": list, "success": bool}
@@ -284,41 +466,74 @@ class OCREngine:
         if not image_path or not Path(image_path).exists():
             raise OCREngineError(f"图片路径不存在: {image_path}")
         
+        logger.debug(f"[OCR] 开始识别: {image_path}")
+        
         # 检查缓存
         cached_result = self._check_cache(image_path)
         if cached_result:
+            # 即使从缓存返回，也要检查中断状态
+            if is_interrupted and is_interrupted():
+                raise OCREngineError("识别任务已被中断")
             return cached_result
         
-        if not self._initialized:
-            if not self.initialize():
-                raise OCREngineError("引擎初始化失败")
+        # 确保引擎处于可用状态（检查子进程是否损坏，快速中断场景下很重要）
+        if not self._ensure_engine_ready():
+            raise OCREngineError("引擎初始化失败")
+        
+        logger.debug(f"[OCR] 引擎状态: initialized={self._initialized}")
         
         retry = 0
         while retry < self.retry_count:
             try:
-                result = self.ocr.run(image_path)
+                result = self._run_with_interrupt_check(
+                    image_path, is_interrupted=is_interrupted
+                )
                 
-                # 提取纯文本
+                # 打印原始返回数据（用于调试）
+                logger.debug(f"[OCR] 原始返回: code={result.get('code')}, data={result.get('data')}")
+                
+                code = result.get("code", -1)
+                
+                # ★★★ 重要：只有 code=100 才提取文本和标记成功 ★★★
+                # 这是引擎的强制要求
+                # code=101: 未识别到文字（成功但无文本）
+                # 其他 code: 识别失败
+                
                 texts = []
-                if result.get("code") == 100 and result.get("data"):
-                    for item in result["data"]:
-                        if isinstance(item, dict) and "text" in item:
-                            texts.append(item["text"])
                 
-                result["texts"] = texts
-                result["success"] = result.get("code") == 100
-                
-                if result["success"]:
-                    logger.debug(f"[OCR] 识别成功，共 {len(texts)} 行文本")
+                if code == 100:
+                    # 只有 code=100 时才提取文本
+                    if result.get("data"):
+                        data = result["data"]
+                        if isinstance(data, list):
+                            for item in data:
+                                if isinstance(item, dict) and "text" in item:
+                                    texts.append(item["text"])
+                    
+                    result["texts"] = texts
+                    result["success"] = True
+                    logger.info(f"[OCR] 识别成功，code={code}，共 {len(texts)} 行文本")
                     # 更新缓存
                     self._update_cache(image_path, result)
                 else:
-                    logger.warning(f"[OCR] 识别失败: {self.get_code_message(result.get('code', -1))}")
+                    # code≠100，不提取文本，标记为失败
+                    result["texts"] = []
+                    result["success"] = False
+                    
+                    # 只有在非取消时才记录警告
+                    if not result.get('cancelled'):
+                        logger.warning(f"[OCR] 识别失败: code={code}, {self.get_code_message(code)}")
+                        logger.debug(f"[OCR] 识别失败详情: data={result.get('data')}")
                 
                 return result
                 
             except Exception as e:
+                # 检查中断
+                if is_interrupted and is_interrupted():
+                    raise OCREngineError("识别任务已被中断")
+                    
                 retry += 1
+                logger.debug(f"[OCR] 重试 {retry}/{self.retry_count}: {e}")
                 if retry >= self.retry_count:
                     raise OCREngineError(f"识别过程出错: {str(e)}", e)
                 # 等待一段时间后重试
@@ -339,9 +554,9 @@ class OCREngine:
         if not image_bytes:
             raise OCREngineError("图片字节数据为空")
         
-        if not self._initialized:
-            if not self.initialize():
-                raise OCREngineError("引擎初始化失败")
+        # 确保引擎处于可用状态
+        if not self._ensure_engine_ready():
+            raise OCREngineError("引擎初始化失败")
         
         retry = 0
         while retry < self.retry_count:
@@ -393,22 +608,30 @@ class OCREngine:
             return False
     
     def recognize_auto(self, image_path: str, config=None, 
-                      progress_callback: Optional[Callable[[int, int], None]] = None) -> Dict[str, Any]:
+                      progress_callback: Optional[Callable[[int, int], None]] = None, 
+                      is_interrupted: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
         """自动判断并执行识别（普通图或超长图切片）
         
         Args:
             image_path: 图片路径
             config: 配置对象（可选），需提供 get_slice_height() 和 get_slice_overlap() 方法
             progress_callback: 切片进度回调函数 (current, total)
+            is_interrupted: 中断检查函数，返回 True 表示需要中断
             
         Returns:
             识别结果字典
         """
-        # 获取切片参数
+        # 检查中断
+        if is_interrupted and is_interrupted():
+            raise OCREngineError("识别任务已被中断")
+            
+        # 获取切片参数及开关
+        long_image_mode = True  # 默认开启
         if config:
             try:
                 slice_height = config.get_slice_height()
                 overlap = config.get_slice_overlap()
+                long_image_mode = config.get_long_image_mode()
             except AttributeError:
                 logger.warning("配置对象缺少必要方法，使用默认切片参数")
                 slice_height = 2000
@@ -417,21 +640,23 @@ class OCREngine:
             slice_height = 2000
             overlap = 100
         
-        # 自动判断是否需要切片
-        if self.should_use_slice(image_path, slice_height):
+        # 自动判断是否需要切片（须检查 long_image_mode 开关）
+        if long_image_mode and self.should_use_slice(image_path, slice_height):
             logger.info("[OCR] 开始超长图切片识别")
             return self.recognize_long_image(
                 image_path,
                 slice_height=slice_height,
                 overlap=overlap,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                is_interrupted=is_interrupted
             )
         else:
-            return self.recognize(image_path)
+            return self.recognize(image_path, is_interrupted=is_interrupted)
 
     @error_handling(ErrorType.OCR_ENGINE, "OCR 超长图识别失败")
     def recognize_long_image(self, image_path: str, slice_height: int = 2000, 
-                             overlap: int = 100, progress_callback: Optional[Callable[[int, int], None]] = None) -> Dict[str, Any]:
+                             overlap: int = 100, progress_callback: Optional[Callable[[int, int], None]] = None, 
+                             is_interrupted: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
         """
         超长图切片识别：将超高图片切成若干块分别识别，再合并结果。
 
@@ -440,14 +665,22 @@ class OCREngine:
             slice_height: 每块的高度（像素），默认 2000
             overlap: 相邻切片的重叠像素，防止文字被切断，默认 100
             progress_callback: 进度回调函数，接收 (current, total) 参数
+            is_interrupted: 中断检查函数，返回 True 表示需要中断
 
         Returns:
             与 recognize() 格式相同的识别结果
             {"code": 100, "data": [...], "texts": [...], "success": True}
         """
+        # 检查中断
+        if is_interrupted and is_interrupted():
+            raise OCREngineError("识别任务已被中断")
+            
         # 检查缓存
         cached_result = self._check_cache(image_path)
         if cached_result:
+            # 即使从缓存返回，也要检查中断状态
+            if is_interrupted and is_interrupted():
+                raise OCREngineError("识别任务已被中断")
             return cached_result
             
         try:
@@ -467,7 +700,7 @@ class OCREngine:
         if img_h <= slice_height:
             logger.info(f"[OCR] 图片高度 {img_h}px 未超过阈值，使用普通识别")
             img.close()
-            result = self.recognize(image_path)
+            result = self.recognize(image_path, is_interrupted=is_interrupted)
             # 更新缓存
             self._update_cache(image_path, result)
             return result
@@ -483,6 +716,11 @@ class OCREngine:
         total_slices = 0
         temp_y = 0
         while temp_y < img_h:
+            # 检查中断
+            if is_interrupted and is_interrupted():
+                img.close()
+                raise OCREngineError("识别任务已被中断")
+                
             total_slices += 1
             y_end = min(temp_y + slice_height, img_h)
             if y_end >= img_h:
@@ -500,6 +738,17 @@ class OCREngine:
 
         try:
             while y_start < img_h:
+                # 检查中断
+                if is_interrupted and is_interrupted():
+                    img.close()
+                    # 清理临时文件
+                    for f in tmp_files:
+                        try:
+                            os.remove(f)
+                        except Exception:
+                            pass
+                    raise OCREngineError("识别任务已被中断")
+                    
                 y_end = min(y_start + slice_height, img_h)
                 slice_index += 1
 
@@ -513,10 +762,34 @@ class OCREngine:
                 # 裁剪当前切片
                 slice_img = img.crop((0, y_start, img_w, y_end))
 
+                # 检查中断
+                if is_interrupted and is_interrupted():
+                    img.close()
+                    slice_img.close()
+                    # 清理临时文件
+                    for f in tmp_files:
+                        try:
+                            os.remove(f)
+                        except Exception:
+                            pass
+                    raise OCREngineError("识别任务已被中断")
+
                 # 写入临时文件（PaddleOCR-json 需要文件路径）
                 tmp_fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix="ocr_slice_")
                 os.close(tmp_fd)
                 tmp_files.append(tmp_path)
+
+                # 检查中断
+                if is_interrupted and is_interrupted():
+                    img.close()
+                    slice_img.close()
+                    # 清理临时文件
+                    for f in tmp_files:
+                        try:
+                            os.remove(f)
+                        except Exception:
+                            pass
+                    raise OCREngineError("识别任务已被中断")
 
                 try:
                     # 统一保存为 PNG，避免 RGBA/调色板模式无法写入 JPEG 的问题
@@ -526,17 +799,42 @@ class OCREngine:
                         save_img = save_img.convert("RGB")
                     save_img.save(tmp_path, format="PNG", optimize=True, compress_level=5)
                 except Exception as e:
+                    img.close()
+                    slice_img.close()
+                    # 清理临时文件
+                    for f in tmp_files:
+                        try:
+                            os.remove(f)
+                        except Exception:
+                            pass
                     raise OCREngineError(f"保存切片失败: {str(e)}", e)
                 finally:
                     slice_img.close()
 
-                # 识别切片（带重试机制）
+                # 检查中断
+                if is_interrupted and is_interrupted():
+                    img.close()
+                    # 清理临时文件
+                    for f in tmp_files:
+                        try:
+                            os.remove(f)
+                        except Exception:
+                            pass
+                    raise OCREngineError("识别任务已被中断")
+
+                # 识别切片（带重试机制，使用可中断调用）
                 retry = 0
                 slice_result = None
                 while retry < self.retry_count:
                     try:
-                        slice_result = self.ocr.run(tmp_path)
+                        # 守护线程 + 轮询：每 100ms 检查一次中断标志，响应快
+                        slice_result = self._run_with_interrupt_check(
+                            tmp_path, is_interrupted=is_interrupted
+                        )
                         break
+                    except OCREngineError:
+                        # 中断或超时异常直接向上传播
+                        raise
                     except Exception as e:
                         retry += 1
                         if retry >= self.retry_count:
@@ -546,6 +844,23 @@ class OCREngine:
                 
                 if not slice_result:
                     continue
+
+                # 检查是否是取消结果
+                if slice_result.get("cancelled") or slice_result.get("code") == 998:
+                    logger.info(f"[OCR] 切片 {slice_index} 识别被取消")
+                    # 检查是否完全取消（没有收集到任何数据）
+                    if not all_data:
+                        raise OCREngineError("识别任务已被取消")
+                    # 有部分数据，返回已收集的结果
+                    result = {
+                        "code": 100, 
+                        "data": all_data, 
+                        "texts": all_texts, 
+                        "success": True,
+                        "cancelled": True
+                    }
+                    self._update_cache(image_path, result)
+                    return result
 
                 if slice_result.get("code") == 100:
                     for item in slice_result.get("data", []):
@@ -563,6 +878,20 @@ class OCREngine:
                     logger.debug(f"[OCR] 切片 {slice_index} 未识别到文字")
                 else:
                     logger.warning(f"[OCR] 切片 {slice_index} 识别异常: code={slice_result.get('code')}")
+
+                # 检查是否请求了取消
+                if slice_result.get("cancelled") or slice_result.get("code") == 998:
+                    logger.info("[OCR] 识别已取消，停止后续切片")
+                    result = {
+                        "code": 100, 
+                        "data": all_data, 
+                        "texts": all_texts, 
+                        "success": True,
+                        "cancelled": True
+                    }
+                    if all_data:
+                        self._update_cache(image_path, result)
+                    return result
 
                 # 下一切片起始位置（减去重叠区域）
                 if y_end >= img_h:

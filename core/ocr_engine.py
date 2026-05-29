@@ -4,6 +4,8 @@
 
 import sys
 import os
+import atexit
+import signal
 import time
 import subprocess
 import tempfile
@@ -22,6 +24,9 @@ _ocr_cache: Dict[str, Dict[str, Any]] = {}
 # 缓存大小限制
 MAX_CACHE_SIZE = 100
 
+# 全局关闭标志（用于 emergency_cleanup 通知所有实例）
+_global_shutting_down = False
+
 # 添加父目录到路径以便导入 PPOCR_api
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -29,6 +34,7 @@ from api.PPOCR_api import GetOcrApi
 from .config import DEFAULT_OCR_EXE, DEFAULT_MODELS_PATH, DEFAULT_ARGS, LANGUAGES
 
 from .error_handler import OCREngineError, handle_error, error_handling, ErrorType
+from .log_context import LogContext
 
 # 状态码说明（官方文档 + 自定义）
 OCR_CODES = {
@@ -76,22 +82,25 @@ class OCREngine:
         self.language = language
         self.args: Dict[str, Any] = {}
         self.retry_count = 3  # 默认重试次数
-        
+
         # 验证路径
         self._validate_paths()
-        
+
         # 添加语言配置
         if language in LANGUAGES:
             self.args["config_path"] = os.path.join(self.models_path, LANGUAGES[language])
-        
+
         # 合并自定义参数（如果传入了的话）
         if custom_args:
             self.args.update(custom_args)
-        
+
         # 注意：不传递 limit_side_len，让 PaddleOCR-json 使用默认值（960）
-        
+
         self.ocr = None
         self._initialized = False
+        self._shutting_down = False  # 关闭标志
+        self._engine_lock = threading.RLock()  # 管道引擎不支持并发，必须串行化访问（使用 RLock 允许重入）
+        self._emit = None  # EventBus 事件推送器（由 CoreAPI 注入）
     
     def _validate_paths(self) -> None:
         """验证 OCR 引擎和模型路径的有效性"""
@@ -100,6 +109,17 @@ class OCREngine:
         
         if not Path(self.models_path).exists():
             logger.warning(f"模型路径不存在: {self.models_path}")
+    
+    def set_event_emitter(self, emitter) -> None:
+        """设置事件推送器（由 CoreAPI 注入）
+
+        核心模块通过此方法获得向 EventBus 推送事件的能力。
+        只在 _emit 不为 None 时推送，兼容没有 CoreAPI 的场景。
+
+        Args:
+            emitter: 事件推送函数，签名为 emitter(channel: str, **data)
+        """
+        self._emit = emitter
     
     def check_config(self) -> bool:
         """检查 OCR 引擎配置是否完整有效"""
@@ -115,7 +135,8 @@ class OCREngine:
     def _cleanup_residual_processes(self) -> None:
         """清理残留的 PaddleOCR 进程
         
-        防止多次启动导致资源浪费
+        防止多次启动导致资源浪费。
+        使用 taskkill /F /T 终止进程树（包括子进程）。
         """
         try:
             # 仅在 Windows 平台执行
@@ -142,21 +163,43 @@ class OCREngine:
                     if len(parts) >= 2:
                         pid = parts[1].strip('"')
                         try:
-                            subprocess.run(['taskkill', '/F', '/PID', pid],
-                                        capture_output=True,
-                                        timeout=3,
-                                        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
-                            cleaned_count += 1
-                        except (subprocess.TimeoutExpired, Exception):
-                            pass
+                            # 使用 /F (强制) + /T (终止进程树) 参数
+                            kill_result = subprocess.run(
+                                ['taskkill', '/F', '/T', '/PID', pid],
+                                capture_output=True,
+                                timeout=5,
+                                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                            )
+                            
+                            if kill_result.returncode == 0:
+                                cleaned_count += 1
+                                logger.info(f"[OCR] 已终止进程树 (PID={pid})")
+                            else:
+                                # 可能进程已经退出
+                                logger.debug(f"[OCR] taskkill 返回码 {kill_result.returncode} for PID={pid}")
+                        except subprocess.TimeoutExpired:
+                            logger.warning(f"[OCR] 终止进程超时 (PID={pid})")
+                        except Exception as e:
+                            logger.warning(f"[OCR] 终止进程失败 (PID={pid}): {e}")
             
             if cleaned_count > 0:
                 logger.info(f"[OCR] 已清理 {cleaned_count} 个残留进程")
+            
+            # 额外：使用 taskkill /F /IM 作为二次清理（防止遗漏）
+            try:
+                subprocess.run(
+                    ['taskkill', '/F', '/T', '/IM', exe_name],
+                    capture_output=True,
+                    timeout=5,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+            except Exception:
+                pass  # 忽略二次清理的错误
                 
         except subprocess.TimeoutExpired:
             logger.warning("[OCR] 清理进程超时")
         except Exception as e:
-            logger.error(f"[OCR] 清理残留进程失败: {e}")
+            logger.error(f"[OCR] 清理残留进程失败: {e}", exc_info=True)
     
     def _is_process_alive(self) -> bool:
         """检查子进程是否存活
@@ -177,6 +220,11 @@ class OCREngine:
         Returns:
             引擎是否可用
         """
+        # ★★★ 关键：如果正在关闭，不初始化引擎 ★★★
+        if self._shutting_down or _global_shutting_down:
+            logger.warning("[OCR] 程序正在关闭，不初始化引擎")
+            return False
+        
         if not self._initialized:
             return self.initialize()
         
@@ -267,7 +315,14 @@ class OCREngine:
         def _worker():
             try:
                 logger.debug(f"[OCR] 守护线程开始执行 ocr.run({os.path.basename(image_path)})")
-                res = self.ocr.run(image_path)
+                # 管道引擎不支持并发，必须串行化访问
+                # 同时在此处原子地检查引擎是否就绪，避免 TOCTOU 竞态
+                with self._engine_lock:
+                    if not self._ensure_engine_ready():
+                        logger.error("[OCR] 守护线程：引擎初始化失败")
+                        result_queue.put(("err", OCREngineError("OCR 引擎初始化失败，请检查引擎状态")))
+                        return
+                    res = self.ocr.run(image_path)
                 logger.debug(f"[OCR] 守护线程 ocr.run() 返回，code={res.get('code')}")
                 result_queue.put(("ok", res))
             except Exception as exc:
@@ -352,35 +407,71 @@ class OCREngine:
         Returns:
             是否初始化成功
         """
-        if self._initialized and self._is_process_alive():
+        # ★★★ 关键：如果正在关闭，不初始化引擎 ★★★
+        if self._shutting_down or _global_shutting_down:
+            logger.warning("[OCR] 程序正在关闭，不初始化引擎")
+            return False
+        
+        # 加锁防止多线程同时创建多个子进程，并避免 TOCTOU 竞态条件
+        with self._engine_lock:
+            # 双重检查：其他线程可能已初始化完成
+            if self._initialized and self._is_process_alive():
+                return True
+
+            # 进程已不存在，需要重新初始化
+            if self._initialized and not self._is_process_alive():
+                logger.info("[OCR] 子进程已终止，准备重新初始化...")
+                self._initialized = False
+                self.ocr = None
+
+            # 验证路径存在性
+            if not Path(self.exe_path).exists():
+                raise OCREngineError(f"OCR 引擎文件不存在: {self.exe_path}")
+
+            if not Path(self.models_path).exists():
+                raise OCREngineError(f"模型文件夹不存在: {self.models_path}")
+
+            # 清理残留进程
+            self._cleanup_residual_processes()
+
+            _t0 = time.time()
+            logger.info(f"[OCR] 正在初始化引擎: {self.exe_path}")
+            self.ocr = GetOcrApi(
+                self.exe_path,
+                self.models_path,
+                self.args,
+                ipcMode="pipe"
+            )
+            self._initialized = True
+            _elapsed = time.time() - _t0
+            logger.info(f"[OCR] 引擎初始化成功，耗时 {_elapsed:.1f}s")
             return True
+    
+    def is_ready(self) -> bool:
+        """
+        检查 OCR 引擎是否已就绪
         
-        # 进程已不存在，需要重新初始化
-        if self._initialized and not self._is_process_alive():
-            logger.info("[OCR] 子进程已终止，准备重新初始化...")
-            self._initialized = False
-            self.ocr = None
+        Returns:
+            bool: 引擎已初始化返回 True，否则返回 False
+        """
+        return self._initialized and self.ocr is not None
+    
+    def get_status(self) -> str:
+        """
+        获取 OCR 引擎详细状态
         
-        # 验证路径存在性
-        if not Path(self.exe_path).exists():
-            raise OCREngineError(f"OCR 引擎文件不存在: {self.exe_path}")
-        
-        if not Path(self.models_path).exists():
-            raise OCREngineError(f"模型文件夹不存在: {self.models_path}")
-        
-        # 清理残留进程
-        self._cleanup_residual_processes()
-        
-        logger.info(f"[OCR] 正在初始化引擎: {self.exe_path}")
-        self.ocr = GetOcrApi(
-            self.exe_path,
-            self.models_path,
-            self.args,
-            ipcMode="pipe"
-        )
-        self._initialized = True
-        logger.info("[OCR] 引擎初始化成功")
-        return True
+        Returns:
+            str: 'ready' | 'not_initialized' | 'error'
+        """
+        if self._initialized and self.ocr is not None:
+            # 检查进程是否还活着
+            if self._is_process_alive():
+                return 'ready'
+            else:
+                self._initialized = False
+                return 'error'
+        else:
+            return 'not_initialized'
     
     def _get_image_hash(self, image_path: str) -> str:
         """
@@ -474,13 +565,17 @@ class OCREngine:
             # 即使从缓存返回，也要检查中断状态
             if is_interrupted and is_interrupted():
                 raise OCREngineError("识别任务已被中断")
+            logger.debug(f"[OCR] 命中缓存，跳过引擎调用: {image_path}")
             return cached_result
         
-        # 确保引擎处于可用状态（检查子进程是否损坏，快速中断场景下很重要）
-        if not self._ensure_engine_ready():
-            raise OCREngineError("引擎初始化失败")
+        # 引擎就绪检查已移至 _run_with_interrupt_check._worker 内部（加锁原子操作）
+        # 此处不再需要显式检查，避免 TOCTOU 竞态条件
+        logger.debug(f"[OCR] 开始识别，引擎状态: initialized={self._initialized}")
         
-        logger.debug(f"[OCR] 引擎状态: initialized={self._initialized}")
+        # 定义可重试的错误码（引擎相关错误，重新初始化后可能恢复）
+        RETRYABLE_CODES = {901, 902, 903, 904, 998, 999}
+        
+        _recog_start = time.time()
         
         retry = 0
         while retry < self.retry_count:
@@ -493,6 +588,41 @@ class OCREngine:
                 logger.debug(f"[OCR] 原始返回: code={result.get('code')}, data={result.get('data')}")
                 
                 code = result.get("code", -1)
+                
+                # 检查是否是可重试的错误码
+                if code in RETRYABLE_CODES:
+                    retry += 1
+                    logger.warning(f"[OCR] 可重试错误: code={code}, {self.get_code_message(code)}, 重试 {retry}/{self.retry_count}")
+                    
+                    # ★★★ 关键：如果正在关闭，不重试，直接返回错误 ★★★
+                    if self._shutting_down or _global_shutting_down:
+                        logger.warning(f"[OCR] 程序正在关闭，不再重试，直接返回错误")
+                        result["texts"] = []
+                        result["success"] = False
+                        return result
+                    
+                    if retry >= self.retry_count:
+                        # 已用完重试次数，返回错误结果
+                        result["texts"] = []
+                        result["success"] = False
+                        # ★ 推送重试失败事件
+                        if self._emit:
+                            self._emit("engine:event", type="retry_failed", retry=retry,
+                                      reason=self.get_code_message(code))
+                        return result
+                    
+                    # ★ 推送崩溃恢复事件（即将重试）
+                    if self._emit:
+                        self._emit("engine:event", type="crash_recovered", retry=retry)
+                    
+                    # 标记引擎需要重新初始化
+                    logger.info(f"[OCR] 标记引擎需要重新初始化（错误码 {code}）")
+                    self._initialized = False
+                    self.ocr = None
+                    
+                    # 等待一段时间后重试（指数退避）
+                    time.sleep(0.5 * retry)
+                    continue
                 
                 # ★★★ 重要：只有 code=100 才提取文本和标记成功 ★★★
                 # 这是引擎的强制要求
@@ -512,7 +642,8 @@ class OCREngine:
                     
                     result["texts"] = texts
                     result["success"] = True
-                    logger.info(f"[OCR] 识别成功，code={code}，共 {len(texts)} 行文本")
+                    _recog_elapsed = time.time() - _recog_start
+                    logger.info(f"[OCR] 识别成功，code={code}，共 {len(texts)} 行文本，耗时 {_recog_elapsed:.1f}s")
                     # 更新缓存
                     self._update_cache(image_path, result)
                 else:
@@ -531,13 +662,23 @@ class OCREngine:
                 # 检查中断
                 if is_interrupted and is_interrupted():
                     raise OCREngineError("识别任务已被中断")
+                
+                # ★★★ 关键：如果正在关闭，不重试，直接抛出异常 ★★★
+                if self._shutting_down or _global_shutting_down:
+                    logger.warning(f"[OCR] 程序正在关闭，不再重试，直接抛出异常")
+                    raise OCREngineError(f"识别过程出错（程序正在关闭）: {str(e)}", e)
                     
                 retry += 1
                 logger.debug(f"[OCR] 重试 {retry}/{self.retry_count}: {e}")
                 if retry >= self.retry_count:
+                    # ★ 推送重试失败事件
+                    if self._emit:
+                        self._emit("engine:event", type="retry_failed", retry=retry, reason=str(e))
                     raise OCREngineError(f"识别过程出错: {str(e)}", e)
+                # ★ 推送崩溃恢复事件（即将重试）
+                if self._emit:
+                    self._emit("engine:event", type="crash_recovered", retry=retry)
                 # 等待一段时间后重试
-                import time
                 time.sleep(0.5)
     
     @error_handling(ErrorType.OCR_ENGINE, "OCR 字节流识别失败")
@@ -554,14 +695,15 @@ class OCREngine:
         if not image_bytes:
             raise OCREngineError("图片字节数据为空")
         
-        # 确保引擎处于可用状态
-        if not self._ensure_engine_ready():
-            raise OCREngineError("引擎初始化失败")
-        
         retry = 0
         while retry < self.retry_count:
             try:
-                result = self.ocr.runBytes(image_bytes)
+                # 管道引擎不支持并发，必须串行化访问
+                # 同时在此处原子地检查引擎是否就绪，避免 TOCTOU 竞态
+                with self._engine_lock:
+                    if not self._ensure_engine_ready():
+                        raise OCREngineError("OCR 引擎初始化失败，请检查引擎状态")
+                    result = self.ocr.runBytes(image_bytes)
                 
                 # 提取纯文本
                 texts = []
@@ -579,11 +721,21 @@ class OCREngine:
                 return result
                 
             except Exception as e:
+                # ★★★ 关键：如果正在关闭，不重试，直接抛出异常 ★★★
+                if self._shutting_down or _global_shutting_down:
+                    logger.warning(f"[OCR] 程序正在关闭，不再重试，直接抛出异常")
+                    raise OCREngineError(f"字节流识别出错（程序正在关闭）: {str(e)}", e)
+                    
                 retry += 1
                 if retry >= self.retry_count:
+                    # ★ 推送重试失败事件
+                    if self._emit:
+                        self._emit("engine:event", type="retry_failed", retry=retry, reason=str(e))
                     raise OCREngineError(f"字节流识别出错: {str(e)}", e)
+                # ★ 推送崩溃恢复事件（即将重试）
+                if self._emit:
+                    self._emit("engine:event", type="crash_recovered", retry=retry)
                 # 等待一段时间后重试
-                import time
                 time.sleep(0.5)
 
     def should_use_slice(self, image_path: str, slice_height: int = 2000) -> bool:
@@ -707,14 +859,10 @@ class OCREngine:
 
         logger.info(f"[OCR] 开始超长图切片识别: {img_w}×{img_h}, 切片高度={slice_height}, 重叠={overlap}")
 
-        if not self._initialized:
-            if not self.initialize():
-                img.close()
-                raise OCREngineError("引擎初始化失败")
-
         # 计算总切片数（用于进度报告）
         total_slices = 0
         temp_y = 0
+        _slice_start = time.time()
         while temp_y < img_h:
             # 检查中断
             if is_interrupted and is_interrupted():
@@ -839,7 +987,6 @@ class OCREngine:
                         retry += 1
                         if retry >= self.retry_count:
                             raise OCREngineError(f"切片 {slice_index} 识别异常: {str(e)}", e)
-                        import time
                         time.sleep(0.3)
                 
                 if not slice_result:
@@ -916,7 +1063,8 @@ class OCREngine:
 
         result = {}
         if all_data:
-            logger.info(f"[OCR] 切片识别完成，共识别 {len(all_texts)} 行文本")
+            _slice_elapsed = time.time() - _slice_start
+            logger.info(f"[OCR] 切片识别完成，共 {total_slices} 片，{len(all_texts)} 行文本，总耗时 {_slice_elapsed:.1f}s")
             result = {"code": 100, "data": all_data, "texts": all_texts, "success": True}
             # 更新缓存
             self._update_cache(image_path, result)
@@ -953,38 +1101,39 @@ class OCREngine:
     
     def _reinit_engine(self) -> bool:
         """重建 OCR 引擎
-        
+
         Returns:
             是否重建成功
         """
-        # 关闭旧引擎
-        if self.ocr:
-            try:
-                self.ocr.exit()
-            except Exception as e:
-                logger.warning(f"[OCR] 关闭旧引擎时出错: {e}")
-        self.ocr = None
-        self._initialized = False
-        
-        # 清理残留进程
-        self._cleanup_residual_processes()
-        
-        # 重新初始化
-        try:
-            logger.info(f"[OCR] 正在重建引擎，语言: {self.language}")
-            self.ocr = GetOcrApi(
-                self.exe_path,
-                self.models_path,
-                self.args,
-                ipcMode="pipe"
-            )
-            self._initialized = True
-            logger.info(f"[OCR] 引擎已重建，语言: {self.language}")
-            return True
-        except Exception as e:
-            logger.error(f"[OCR] 引擎重建失败: {e}", exc_info=True)
+        with self._engine_lock:
+            # 关闭旧引擎
+            if self.ocr:
+                try:
+                    self.ocr.exit()
+                except Exception as e:
+                    logger.warning(f"[OCR] 关闭旧引擎时出错: {e}")
+            self.ocr = None
             self._initialized = False
-            return False
+
+            # 清理残留进程
+            self._cleanup_residual_processes()
+
+            # 重新初始化
+            try:
+                logger.info(f"[OCR] 正在重建引擎，语言: {self.language}")
+                self.ocr = GetOcrApi(
+                    self.exe_path,
+                    self.models_path,
+                    self.args,
+                    ipcMode="pipe"
+                )
+                self._initialized = True
+                logger.info(f"[OCR] 引擎已重建，语言: {self.language}")
+                return True
+            except Exception as e:
+                logger.error(f"[OCR] 引擎重建失败: {e}", exc_info=True)
+                self._initialized = False
+                return False
     
     def update_args(self, new_args: Dict[str, Any]) -> None:
         """更新 OCR 参数
@@ -996,21 +1145,256 @@ class OCREngine:
         self._initialized = False  # 需要重新初始化
         logger.info("[OCR] 参数已更新，将在下次识别时重新初始化")
     
-    def close(self) -> None:
-        """关闭 OCR 引擎并释放资源"""
-        if self.ocr:
+    def begin_shutdown(self) -> None:
+        """设置关闭标志（非阻塞）
+        
+        供 closeEvent() 调用：立即设置标志，不等待锁，不阻塞主线程。
+        同时取消 PPOCR_api.exit() 的 atexit 注册，防止它在优雅关闭前强杀进程。
+        """
+        logger.info("[OCR] begin_shutdown() 被调用，设置关闭标志")
+        self._shutting_down = True
+        global _global_shutting_down
+        _global_shutting_down = True
+        
+        # ★ 推送引擎关闭事件
+        if self._emit:
+            self._emit("engine:status", type="shutting_down")
+        
+        # ★ 关键：取消 PPOCR_api.exit() 的 atexit 注册
+        # PPOCR_api.exit() 在 atexit 中后注册先执行（LIFO），会在 _global_emergency_cleanup 之前
+        # 强杀进程并把 self.ret 设为 None，导致优雅关闭无法执行
+        if self.ocr and hasattr(self.ocr, 'exit'):
             try:
-                self.ocr.exit()
-                logger.info("[OCR] 引擎已关闭")
-            except Exception as e:
-                logger.warning(f"[OCR] 关闭引擎时出错: {e}")
-            finally:
-                self.ocr = None
-                self._initialized = False
+                atexit.unregister(self.ocr.exit)
+                logger.debug("[OCR] 已取消 PPOCR_api.exit() 的 atexit 注册")
+            except Exception:
+                pass
+        
+        logger.info(f"[OCR] 关闭标志已设置，self.ocr={self.ocr is not None}, _initialized={self._initialized}")
+        logger.info("[OCR] begin_shutdown() 完成，等待 atexit 执行优雅关闭")
+
+    def close(self) -> None:
+        """关闭 OCR 引擎并释放资源（阻塞版，会等待锁释放）
+        
+        优先使用优雅关闭（让引擎自行退出），失败后强制终止。
+        由 atexit / __del__ 调用，此时识别线程已退出，不存在死锁。
+        """
+        logger.info("[OCR] close() 方法被调用")
+        # 设置关闭标志，防止重试逻辑重新启动引擎
+        self._shutting_down = True
+        global _global_shutting_down
+        _global_shutting_down = True
+
+        # 取消 atexit 注册，防止 _global_emergency_cleanup 再次被触发
+        try:
+            atexit.unregister(_global_emergency_cleanup)
+            logger.debug("[OCR] 已取消 atexit 紧急清理注册")
+        except Exception:
+            pass
+
+        logger.info("[OCR] 等待引擎锁...")
+        with self._engine_lock:
+            logger.info("[OCR] 开始关闭引擎...")
+
+            # 1. 尝试通过 self.ocr 优雅关闭
+            if self.ocr and hasattr(self.ocr, 'ret') and self.ocr.ret:
+                proc = self.ocr.ret
+                try:
+                    # 取消 atexit 注册，防止 Python 退出时再次调用 exit()
+                    atexit.unregister(self.ocr.exit)
+
+                    # 向 stdin 写入 exit 指令（官方优雅关闭方式，stdin 是二进制流）
+                    if not proc.stdin.closed:
+                        logger.info("[OCR] 发送优雅关闭指令 (exit\\n)...")
+                        proc.stdin.write(b"exit\n")
+                        proc.stdin.flush()
+                        proc.stdin.close()
+
+                    # 等待进程自行退出（最多5秒）
+                    logger.info("[OCR] 等待引擎自行退出...")
+                    try:
+                        proc.wait(timeout=5)
+                        logger.info("[OCR] 引擎已自行退出（优雅关闭成功）")
+                        self.ocr = None
+                        self._initialized = False
+                        logger.info("[OCR] 引擎资源已释放")
+                        return
+                    except subprocess.TimeoutExpired:
+                        logger.warning("[OCR] 引擎未能在5秒内退出，转为强制终止...")
+                except Exception as e:
+                    logger.warning(f"[OCR] 优雅关闭失败: {e}，转为强制终止...")
+            else:
+                # self.ocr 为 None（可能在重试时被清空），但进程可能还在运行
+                logger.info("[OCR] ocr 实例已为 None，检查是否有残留进程...")
+
+            # 2. 强制终止（优雅关闭超时 或 ocr 已为 None 时的兜底）
+            if sys.platform == 'win32':
+                for proc_name in ['PaddleOCR-json.exe']:
+                    try:
+                        check = subprocess.run(
+                            ['tasklist', '/FI', f'IMAGENAME eq {proc_name}', '/NH', '/FO', 'CSV'],
+                            capture_output=True, text=True, timeout=5,
+                            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                        )
+                        if proc_name in check.stdout:
+                            logger.warning(f"[OCR] 发现残留进程 {proc_name}，强制终止...")
+                            kill_result = subprocess.run(
+                                ['taskkill', '/F', '/T', '/IM', proc_name],
+                                capture_output=True, text=True, timeout=10,
+                                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                            )
+                            if kill_result.returncode == 0:
+                                logger.info(f"[OCR] 进程 {proc_name} 已强制终止")
+                            else:
+                                logger.warning(f"[OCR] taskkill 返回码: {kill_result.returncode}")
+                        else:
+                            logger.info(f"[OCR] 未发现残留进程 {proc_name}，无需强制终止")
+                    except Exception as e:
+                        logger.warning(f"[OCR] 检查/终止进程时出错: {e}")
+            else:
+                # Linux/Mac 兜底
+                if self.ocr and hasattr(self.ocr, 'ret') and self.ocr.ret:
+                    try:
+                        self.ocr.ret.kill()
+                        self.ocr.ret.wait(timeout=2)
+                    except Exception:
+                        pass
+
+            # 3. 清理状态
+            self.ocr = None
+            self._initialized = False
+            logger.info("[OCR] 引擎资源已释放")
+    
+    def shutdown(self) -> None:
+        """强制关闭引擎（公开接口，供外部调用）
+        
+        与 close() 的区别：会额外清理残留进程。
+        """
+        logger.info("[OCR] 强制关闭引擎...")
+        # 设置关闭标志（close() 也会设置，这里双重保险）
+        self._shutting_down = True
+        global _global_shutting_down
+        _global_shutting_down = True
+        
+        self.close()
+        
+        # 额外清理：确保没有残留进程
+        try:
+            self._cleanup_residual_processes()
+        except Exception as e:
+            logger.warning(f"[OCR] 清理残留进程时出错: {e}")
+    
+    @staticmethod
+    def emergency_cleanup():
+        """
+        独立资源回收方法（不依赖 TaskManager）
+        
+        处理以下场景：
+        1. 用户强行终止（任务管理器结束进程）
+        2. 程序错误意外退出（未捕获的异常）
+        3. 用户强行关闭程序（Alt+F4、点击X按钮）
+        
+        此方法可以直接调用，无需通过 TaskManager 调度。
+        """
+        # 检查全局关闭标志，如果正在关闭则直接返回（避免重复清理）
+        global _global_shutting_down
+        if _global_shutting_down:
+            logger.debug("[OCR] 程序正在关闭，跳过紧急资源回收")
+            return
+        
+        # 设置全局关闭标志，防止重试逻辑重新启动引擎
+        _global_shutting_down = True
+        logger.warning("[OCR] 执行紧急资源回收...")
+        
+        try:
+            # 定义要清理的进程名列表
+            process_names = ['PaddleOCR-json.exe', 'PaddleOCR-json']
+            
+            if os.name == 'nt':
+                # Windows: 使用 taskkill /F /T 终止进程树
+                for proc_name in process_names:
+                    try:
+                        # 先检查进程是否存在
+                        result = subprocess.run(
+                            ['tasklist', '/FI', f'IMAGENAME eq {proc_name}', '/NH', '/FO', 'CSV'],
+                            capture_output=True,
+                            text=True,
+                            timeout=5
+                        )
+                        
+                        if proc_name in result.stdout:
+                            logger.warning(f"[OCR] 发现残留进程 {proc_name}，正在终止（含子进程）...")
+                            
+                            # 使用 /F (强制) + /T (终止进程树) 参数
+                            kill_result = subprocess.run(
+                                ['taskkill', '/F', '/T', '/IM', proc_name],
+                                capture_output=True,
+                                text=True,
+                                timeout=10
+                            )
+                            
+                            if kill_result.returncode == 0:
+                                logger.info(f"[OCR] 进程 {proc_name} 及其子进程已终止")
+                            else:
+                                logger.warning(f"[OCR] taskkill 返回码: {kill_result.returncode}, stderr: {kill_result.stderr}")
+                                
+                    except subprocess.TimeoutExpired:
+                        logger.error(f"[OCR] taskkill 超时: {proc_name}")
+                    except Exception as e:
+                        logger.error(f"[OCR] 终止进程 {proc_name} 时出错: {e}")
+                
+                # 额外：使用 wmic 作为备选方案（更彻底）
+                try:
+                    logger.info("[OCR] 使用 wmic 二次清理...")
+                    for proc_name in process_names:
+                        subprocess.run(
+                            ['wmic', 'process', 'where', f'name="{proc_name}"', 'delete'],
+                            capture_output=True,
+                            timeout=5
+                        )
+                except Exception as e:
+                    logger.debug(f"[OCR] wmic 清理失败（可忽略）: {e}")
+                    
+            else:
+                # Linux/Mac: 使用 pkill -9
+                for proc_name in process_names:
+                    try:
+                        result = subprocess.run(
+                            ['pgrep', '-f', proc_name],
+                            capture_output=True,
+                            text=True,
+                            timeout=5
+                        )
+                        
+                        if result.stdout.strip():
+                            pids = result.stdout.strip().split('\n')
+                            for pid in pids:
+                                try:
+                                    pid_int = int(pid)
+                                    logger.warning(f"[OCR] 发现残留进程 (pid={pid_int})，正在终止...")
+                                    os.kill(pid_int, signal.SIGKILL)
+                                except Exception as e:
+                                    logger.warning(f"[OCR] 终止进程 {pid_int} 失败: {e}")
+                    except Exception as e:
+                        logger.error(f"[OCR] 查找/终止进程 {proc_name} 时出错: {e}")
+        
+        except Exception as e:
+            logger.error(f"[OCR] 紧急资源回收失败: {e}", exc_info=True)
+        
+        logger.info("[OCR] 紧急资源回收完成")
+
+        # ★ 同步状态：进程已被清理，标记引擎为未初始化
+        if _ocr_engine is not None:
+            _ocr_engine._initialized = False
+            _ocr_engine.ocr = None
+            logger.info("[OCR] 引擎状态已重置为未初始化")
     
     def __del__(self) -> None:
         """析构函数 - 确保资源被释放"""
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 # 全局 OCR 引擎实例（使用懒加载和线程安全）
@@ -1068,3 +1452,138 @@ def reset_ocr_engine(exe_path: Optional[str] = None, models_path: Optional[str] 
         logger.info("[OCR] 创建新的全局 OCR 引擎实例")
         _ocr_engine = OCREngine(exe_path, models_path, language or "简体中文", custom_args)
         return _ocr_engine
+# =============================================================================
+# 独立资源回收机制（不依赖 TaskManager）
+# =============================================================================
+
+def _global_emergency_cleanup():
+    """全局清理函数（供 atexit 调用，不依赖 closeEvent）
+    
+    始终执行：设置关闭标志 → 等待线程释放锁 → 优雅关闭（exit\n） → 兜底强杀
+    注意：begin_shutdown() 会提前取消 PPOCR_api.exit() 的 atexit 注册，
+          防止它在优雅关闭前强杀进程（atexit LIFO 顺序问题）。
+    """
+    global _global_shutting_down
+    
+    # 1. 先设置关闭标志，让识别线程停止重试
+    _global_shutting_down = True
+    
+    # 2. 取消 atexit 注册，防止递归调用
+    try:
+        atexit.unregister(_global_emergency_cleanup)
+    except Exception:
+        pass
+    
+    logger.info("[OCR] atexit: 开始关闭清理...")
+    
+    # 3. 等待识别线程释放引擎锁（给1秒时间检测到关闭标志）
+    time.sleep(1)
+    
+    # 4. 尝试优雅关闭
+    try:
+        from api.core_api import _core_api_instance
+        engine = _core_api_instance._ocr_engine if _core_api_instance else None
+        if engine and engine.ocr and hasattr(engine.ocr, 'ret') and engine.ocr.ret:
+            logger.info("[OCR] 等待引擎锁...")
+            acquired = engine._engine_lock.acquire(timeout=8)  # 非阻塞，最多等8秒
+            try:
+                if acquired and engine.ocr.ret:
+                    proc = engine.ocr.ret
+                    # 取消 PPOCR_api 的 atexit 注册（begin_shutdown 已尝试取消，这里兜底）
+                    try:
+                        atexit.unregister(engine.ocr.exit)
+                    except Exception:
+                        pass
+                    # 发送优雅关闭指令
+                    if not proc.stdin.closed:
+                        logger.info("[OCR] 发送优雅关闭指令 (exit\\n)...")
+                        proc.stdin.write(b"exit\n")
+                        proc.stdin.flush()
+                        proc.stdin.close()
+                    # 等待退出（5秒）
+                    logger.info("[OCR] 等待引擎自行退出...")
+                    try:
+                        proc.wait(timeout=5)
+                        logger.info("[OCR] 引擎已自行退出（优雅关闭成功）")
+                        engine.ocr = None
+                        engine._initialized = False
+                        logging.shutdown()
+                        return
+                    except subprocess.TimeoutExpired:
+                        logger.warning("[OCR] 引擎未能在5秒内退出")
+                elif not acquired:
+                    logger.warning("[OCR] 无法在8秒内获取引擎锁，跳过优雅关闭")
+            finally:
+                if acquired:
+                    engine._engine_lock.release()
+        else:
+            logger.info("[OCR] 引擎实例不存在或已关闭")
+    except Exception as e:
+        logger.warning(f"[OCR] 优雅关闭过程出错: {e}")
+    
+    # 5. 兜底：强制清理残留进程
+    logger.info("[OCR] 执行兜底强制清理...")
+    try:
+        OCREngine.emergency_cleanup()
+    except Exception:
+        pass
+    
+    # 6. 确保所有日志写入文件
+    logging.shutdown()
+
+# 1. 注册 atexit 处理程序正常退出
+atexit.register(_global_emergency_cleanup)
+
+# 2. 注册 sys.excepthook 处理未捕获异常
+_original_excepthook = sys.excepthook
+
+def _ocr_excepthook(exc_type, exc_value, exc_traceback):
+    """未捕获异常处理器（仅记录，不触发紧急清理）
+
+    emergency_cleanup 只由 atexit（正常关闭）和 signal（SIGTERM/SIGINT）触发，
+    excepthook 不应强制杀进程，因为大多数未捕获异常（如 AttributeError）
+    不会导致程序崩溃，Qt 事件循环会继续运行。
+    """
+    if exc_type and issubclass(exc_type, Exception):
+        logger.error("[OCR] 未捕获异常: %s: %s", exc_type.__name__, exc_value, exc_info=(exc_type, exc_value, exc_traceback))
+
+    # 不再调用 emergency_cleanup() —— 非致命异常不应强制杀引擎
+
+    # 调用原始的 excepthook（打印到控制台）
+    if _original_excepthook:
+        try:
+            _original_excepthook(exc_type, exc_value, exc_traceback)
+        except Exception:
+            pass
+
+sys.excepthook = _ocr_excepthook
+
+# 3. 注册信号处理（Windows: SIGTERM, SIGINT）
+def _signal_handler(signum, frame):
+    """信号处理器"""
+    import signal as sig
+    sig_name = {sig.SIGTERM: "SIGTERM", sig.SIGINT: "SIGINT"}.get(signum, f"信号 {signum}")
+    
+    # 如果程序正在正常关闭，跳过紧急清理（由 atexit 正常路径处理）
+    if _global_shutting_down:
+        logger.debug(f"[OCR] 收到 {sig_name} 信号，但程序正在关闭，跳过紧急清理")
+    else:
+        logger.warning(f"[OCR] 收到 {sig_name} 信号，执行紧急清理...")
+        OCREngine.emergency_cleanup()
+    
+    # 重新发送信号给原始处理器
+    sig.signal(signum, sig.SIG_DFL)
+    if os.name == 'nt':
+        import ctypes
+        ctypes.windll.kernel32.RaiseException(0xC0000000 | signum, 0, 0, 0)
+    else:
+        os.kill(os.getpid(), signum)
+
+try:
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+    logger.info("[OCR] 信号处理已注册（SIGTERM, SIGINT）")
+except Exception as e:
+    logger.warning(f"[OCR] 注册信号处理失败: {e}")
+
+logger.info("[OCR] 独立资源回收机制已初始化")

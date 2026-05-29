@@ -227,6 +227,10 @@ class HistoryPage(QWidget):
             item = history[self.current_index]
             image_path = item.get('path')
             if os.path.exists(image_path):
+                # ★ 清除该图片的缓存，确保重新识别不走缓存
+                from core.result_manager import get_result_manager
+                get_result_manager().invalidate_cache(image_path)
+                
                 # 切换到 OCR 页面
                 self.main_window.stackedWidget.setCurrentWidget(self.main_window.ocr_page)
                 self.main_window.navigationInterface.setCurrentItem("ocr_page")

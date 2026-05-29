@@ -162,10 +162,22 @@ class TemplateManager:
         
         # 内存缓存
         self._templates: Dict[str, ParseTemplate] = {}
+        self._emit = None  # EventBus 事件推送器（由 CoreAPI 注入）
         
         # 加载所有模板
         self._load_all_templates()
         logger.info(f"已加载 {len(self._templates)} 个模板")
+    
+    def set_event_emitter(self, emitter) -> None:
+        """设置事件推送器（由 CoreAPI 注入）
+
+        核心模块通过此方法获得向 EventBus 推送事件的能力。
+        只在 _emit 不为 None 时推送，兼容没有 CoreAPI 的场景。
+
+        Args:
+            emitter: 事件推送函数，签名为 emitter(channel: str, **data)
+        """
+        self._emit = emitter
     
     # ──────────────────────────────────────────────────────
     # 内部方法 - 文件操作
@@ -176,6 +188,9 @@ class TemplateManager:
         
         会清空现有缓存并重新加载所有 .json 文件。
         加载失败的模板会被跳过并记录日志。
+        
+        ★ 文件名即ID：animal_quarantine.json → id="animal_quarantine"
+        不再依赖 JSON 内部的 "id" 字段，彻底消除文件名≠ID 的问题。
         """
         self._templates.clear()
         
@@ -194,6 +209,10 @@ class TemplateManager:
             try:
                 with open(filepath, 'r', encoding='utf-8') as f:
                     data = json.load(f)
+                
+                # ★ 文件名即ID，强制覆盖 JSON 内部的 id 字段
+                template_id = filename[:-5]  # 去掉 .json
+                data['id'] = template_id
                 
                 template = self._dict_to_template(data)
                 
@@ -267,25 +286,21 @@ class TemplateManager:
             raise TemplateManagerError(f"保存模板失败: {e}")
     
     def _delete_template_file(self, template_id: str) -> bool:
-        """
-        删除模板文件
-        
-        Args:
-            template_id: 模板ID
-        
-        Returns:
-            是否成功删除
-        """
+        """删除模板文件（文件名即ID）"""
         filepath = os.path.join(self.templates_dir, f"{template_id}.json")
-        if os.path.exists(filepath):
-            try:
-                os.remove(filepath)
-                logger.debug(f"模板文件已删除: {filepath}")
-                return True
-            except OSError as e:
-                logger.error(f"删除模板文件失败: {e}")
-                return False
-        return False
+        if not os.path.exists(filepath):
+            logger.info(f"[TemplateManager] 模板文件不存在，仅清理内存: {filepath}")
+            return True
+        try:
+            os.remove(filepath)
+            logger.info(f"[TemplateManager] 模板文件已删除: {filepath}")
+            return True
+        except PermissionError as e:
+            logger.error(f"[TemplateManager] 权限不足，无法删除: {filepath} — {e}")
+            return False
+        except OSError as e:
+            logger.error(f"[TemplateManager] 删除失败: {filepath} — {e}", exc_info=True)
+            return False
     
     # ──────────────────────────────────────────────────────
     # 内部方法 - 数据转换
@@ -402,9 +417,12 @@ class TemplateManager:
                 logger.error(f"模板验证失败: {error_msg}")
                 return False
             
-            # 生成ID（如果是新模板）
+            # 生成ID（如果是新模板，从名称生成）
             if not template.id:
-                template.id = self._generate_id()
+                template.id = self._slugify(template.name)
+            
+            # 判断是新建还是更新（必须在更新缓存前判断）
+            is_new = template.id not in self._templates
             
             # 更新时间戳
             template.updated_at = datetime.now().isoformat()
@@ -416,6 +434,13 @@ class TemplateManager:
             self._templates[template.id] = template
             
             logger.info(f"模板已保存: {template.name} ({template.id})")
+            
+            # ★ 推送模板变更事件
+            if self._emit:
+                self._emit("template:event",
+                          type="created" if is_new else "updated",
+                          id=template.id, name=template.name)
+            
             return True
             
         except Exception as e:
@@ -445,10 +470,17 @@ class TemplateManager:
             # 从内存删除
             del self._templates[template_id]
             
-            # 删除文件
-            self._delete_template_file(template_id)
+            # 删除文件（必须检查返回值）
+            if not self._delete_template_file(template_id):
+                # 文件删除失败 → 回滚：恢复内存中的模板
+                self._templates[template_id] = template
+                logger.error(f"模板文件删除失败，已回滚: {template.name} ({template_id})")
+                return False
             
             logger.info(f"模板已删除: {template.name} ({template_id})")
+            # ★ 推送模板删除事件
+            if self._emit:
+                self._emit("template:event", type="deleted", id=template_id, name=template.name)
             return True
             
         except Exception as e:
@@ -473,7 +505,7 @@ class TemplateManager:
             raise ValueError("模板名称不能为空")
         
         return ParseTemplate(
-            id=self._generate_id(),
+            id=self._slugify(name.strip()),
             name=name.strip(),
             description=description.strip() if description else "",
             rules=[]
@@ -548,10 +580,20 @@ class TemplateManager:
             if not is_valid:
                 return False, f"模板验证失败: {error_msg}"
             
-            # 检查ID冲突，如果存在则生成新ID
+            # ★ 导入模板：强制使用基于名称的ID（丢弃旧版UUID）
+            import re
+            old_id = template.id
+            # 旧版ID是8位纯hex，新版是名称slug
+            if not old_id or re.fullmatch(r'[0-9a-f]{8}', old_id):
+                template.id = self._slugify(template.name)
+            
+            # 检查ID冲突
             if template.id in self._templates:
-                old_id = template.id
-                template.id = self._generate_id()
+                base = template.id
+                counter = 1
+                while f"{base}_{counter}" in self._templates:
+                    counter += 1
+                template.id = f"{base}_{counter}"
                 logger.info(f"模板ID冲突，{old_id} -> {template.id}")
             
             # 保存
@@ -627,9 +669,22 @@ class TemplateManager:
     # ──────────────────────────────────────────────────────
     
     @staticmethod
-    def _generate_id() -> str:
-        """生成唯一的模板ID（8位短UUID）"""
-        return uuid.uuid4().hex[:8]
+    def _slugify(name: str) -> str:
+        """将模板名转为文件安全的 ID
+        
+        规则：保留中文/字母/数字，空格换下划线，去特殊字符
+        示例: "保货单" → "baohuodan", "动物检疫" → "dongwujianyi"
+        """
+        import re
+        # 尝试用拼音风格（中文转小写字母，但这里简单保留原始字符）
+        # 只保留中文、字母、数字、下划线、连字符
+        slug = re.sub(r'[^\w\u4e00-\u9fff-]', '', name)
+        # 空格/空白转下划线
+        slug = re.sub(r'\s+', '_', slug)
+        # 截断过长名称
+        if len(slug) > 50:
+            slug = slug[:50]
+        return slug or f"template_{uuid.uuid4().hex[:8]}"
     
     def get_template_names(self) -> Dict[str, str]:
         """获取所有模板的 ID->名称 映射

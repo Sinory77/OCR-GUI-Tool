@@ -120,7 +120,7 @@ class ConfigManager:
             "long_image_mode": True,    # 超长图切片识别模式（默认开启）
             "slice_height": 2000,       # 切片高度（像素）
             "slice_overlap": 100,       # 切片重叠像素（防止截断文字）
-            "scan_subdirs": True,       # 是否扫描子目录
+            "scan_subdirs": False,      # 是否扫描子目录（默认不扫描）
             "history_storage_limit": 100,  # 历史记录存储上限
             "history_display_limit": 50,   # 历史记录显示上限
             "file_dedup_enabled": True,   # 识别前文件去重

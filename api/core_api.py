@@ -1,283 +1,793 @@
 # -*- coding: utf-8 -*-
 """
-统一核心功能API
-提供统一的接口供界面层调用，实现核心功能与界面的完全分离
-可以选择使用本地API服务或直接调用核心功能
+统一核心功能API（纯接口版）
+提供统一的接口供界面层调用，所有功能通过 TaskManager 任务调度
+
+架构设计：
+    界面层 → CoreAPI (纯接口) → TaskManager (统一调度) → 执行器(核心功能) → 结果通过 TaskManager 返回给 CoreAPI → 推送到界面层
+
+CoreAPI 只提供接口，不包含任何功能实现
 """
 
-import os
 import logging
-from typing import Dict, Any, Optional, List, Tuple, TYPE_CHECKING
-from pathlib import Path
+import os
+import json
+from datetime import datetime
+from typing import Dict, Any, Optional, List, Callable
 
-# 为了解决循环导入问题，使用TYPE_CHECKING
-if TYPE_CHECKING:
-    from core.enhanced_error_handler import ErrorResult
-
-# 尝试导入API适配器，如果API服务器可用则支持API服务模式
-try:
-    from api_server.adapter import api_adapter
-    API_SERVER_AVAILABLE = True
-except ImportError:
-    API_SERVER_AVAILABLE = False
-    api_adapter = None  # 明确设置为None
-
-# 延迟导入核心模块，以避免循环导入
-def _import_core_modules():
-    """延迟导入核心模块，避免循环导入"""
-    from core.ocr_engine import OCREngine
-    from core.config import ConfigManager, get_config_manager
-    from core.result_manager import ResultManager
-    from core.exporter import ResultExporter
-    from core.async_worker import BatchOcrWorker
-    from core.enhanced_error_handler import (
-        EnhancedError, ErrorResult, ErrorType, ErrorCode, 
-        error_handling as enhanced_error_handling, get_error_handler,
-        create_ocr_engine_error, create_config_error, create_file_error, create_export_error
-    )
-    
-    # 返回导入的模块
-    return {
-        'OCREngine': OCREngine,
-        'ConfigManager': ConfigManager,
-        'get_config_manager': get_config_manager,
-        'ResultManager': ResultManager,
-        'ResultExporter': ResultExporter,
-        'BatchOcrWorker': BatchOcrWorker,
-        'EnhancedError': EnhancedError,
-        'ErrorResult': ErrorResult,
-        'ErrorType': ErrorType,
-        'ErrorCode': ErrorCode,
-        'enhanced_error_handling': enhanced_error_handling,
-        'get_error_handler': get_error_handler,
-        'create_ocr_engine_error': create_ocr_engine_error,
-        'create_config_error': create_config_error,
-        'create_file_error': create_file_error,
-        'create_export_error': create_export_error
-    }
-
+from core.task_manager import TaskManager, TaskType, TaskCallback
 
 logger = logging.getLogger(__name__)
 
 
 class CoreAPI:
     """
-    统一核心功能API类
-    封装所有核心功能，供界面层调用
-    支持API服务模式和直接调用模式
+    统一核心功能API类（纯接口版）
+    所有功能通过 TaskManager 统一调度，不实现任何功能
     """
     
-    def __init__(self, use_api_service: bool = False):
+    def __init__(self):
+        """初始化核心API"""
+        logger.info("CoreAPI 初始化 - 纯接口模式，所有功能通过 TaskManager 调度")
+        
+        # 初始化核心组件（延迟加载）
+        self._ocr_engine = None
+        self._config_manager = None
+        self._result_manager = None
+        self._result_exporter = None
+        
+        # 跟踪状态（由回调更新）
+        self._ocr_engine_status = 'not_initialized'  # 'not_initialized' | 'initializing' | 'ready' | 'error'
+        self._ocr_engine_error = None  # 存储初始化错误信息
+
+        # ★ 引擎状态变更通知（核心模块 → 界面层的推送通道）
+        self._engine_status_callbacks: List[Callable] = []
+
+        # ★ EventBus：事件频道订阅机制（核心模块 → 界面层的主动推送通道）
+        self._event_channels: Dict[str, List[Callable]] = {}
+        
+        # 状态管理（当前图片路径、批量文件路径等）
+        self._current_image_path = None
+        self._batch_file_paths = []
+        
+        # 获取任务管理器单例
+        self.task_manager = TaskManager.get_instance()
+        
+        # ★ 引擎心跳守护：定期检测子进程存活，异常退出时自动重启
+        from PySide6.QtCore import QTimer
+        self._heartbeat_timer = QTimer()
+        self._heartbeat_timer.setInterval(3000)  # 每3秒检测一次
+        self._heartbeat_timer.timeout.connect(self._heartbeat_check)
+        self._heartbeat_auto_restart = True  # 是否自动重启（用户主动关闭时置False）
+        
+        # 注册执行器
+        self._register_executors()
+        
+        logger.info("[CoreAPI] 初始化完成，TaskManager 已就绪")
+    
+    def _register_executors(self):
+        """注册任务执行器"""
+        from core.task_manager import create_ocr_executor, create_export_executor, create_scan_executor, create_ocr_init_executor, create_ocr_shutdown_executor, create_reparse_executor
+        
+        # Excel 数据处理执行器
+        from core.excel_processor import (
+            create_excel_load_executor,
+            create_excel_clean_executor,
+            create_excel_pivot_executor,
+            create_excel_export_executor,
+        )
+        
+        # 延迟导入核心模块
+        if self._ocr_engine is None:
+            from core.ocr_engine import OCREngine
+            from core.config import get_config_manager
+            self._config_manager = get_config_manager()
+            exe_path = self._config_manager.get_ocr_exe_path()
+            models_path = self._config_manager.get_models_path()
+            language = self._config_manager.get_language()
+            self._ocr_engine = OCREngine(exe_path=exe_path, models_path=models_path, language=language)
+        
+        if self._result_manager is None:
+            from core.result_manager import get_result_manager
+            self._result_manager = get_result_manager()
+        
+        if self._result_exporter is None:
+            from core.exporter import ResultExporter
+            self._result_exporter = ResultExporter()
+        
+        # 注册 OCR 执行器
+        ocr_executor = create_ocr_executor(self._ocr_engine, self._config_manager, self._result_manager)
+        self.task_manager.register_executor(TaskType.OCR_SINGLE, ocr_executor)
+        self.task_manager.register_executor(TaskType.OCR_BATCH, ocr_executor)
+        
+        # 注册 OCR 初始化执行器
+        ocr_init_executor = create_ocr_init_executor(self._ocr_engine)
+        self.task_manager.register_executor(TaskType.OCR_INIT, ocr_init_executor)
+        
+        # ★ 新增：注册 OCR 关闭执行器
+        ocr_shutdown_executor = create_ocr_shutdown_executor(self._ocr_engine)
+        self.task_manager.register_executor(TaskType.OCR_SHUTDOWN, ocr_shutdown_executor)
+        
+        # 注册导出执行器
+        export_executor = create_export_executor(self._result_exporter)
+        self.task_manager.register_executor(TaskType.EXPORT, export_executor)
+        
+        # 注册扫描执行器
+        scan_executor = create_scan_executor()
+        self.task_manager.register_executor(TaskType.SCAN_DIRECTORY, scan_executor)
+        
+        # ── Excel 数据处理执行器 ──
+        excel_load_executor = create_excel_load_executor()
+        self.task_manager.register_executor(TaskType.EXCEL_LOAD, excel_load_executor)
+        
+        excel_clean_executor = create_excel_clean_executor()
+        self.task_manager.register_executor(TaskType.EXCEL_CLEAN, excel_clean_executor)
+        
+        excel_pivot_executor = create_excel_pivot_executor()
+        self.task_manager.register_executor(TaskType.EXCEL_PIVOT, excel_pivot_executor)
+        
+        excel_export_executor = create_excel_export_executor()
+        self.task_manager.register_executor(TaskType.EXCEL_EXPORT, excel_export_executor)
+        
+        # ★ 新增：注册重新解析执行器
+        reparse_executor = create_reparse_executor()
+        self.task_manager.register_executor(TaskType.OCR_REPARSE, reparse_executor)
+        
+        # ★ 注入事件推送能力到核心模块
+        if hasattr(self._ocr_engine, 'set_event_emitter'):
+            self._ocr_engine.set_event_emitter(self.emit)
+            logger.debug("[CoreAPI] 已向 OCREngine 注入事件推送能力")
+        if hasattr(self._result_manager, 'set_event_emitter'):
+            self._result_manager.set_event_emitter(self.emit)
+            logger.debug("[CoreAPI] 已向 ResultManager 注入事件推送能力")
+        # TemplateManager 通过 get_template_manager() 获取实例并注入
+        from core.template_manager import get_template_manager
+        template_mgr = get_template_manager()
+        if hasattr(template_mgr, 'set_event_emitter'):
+            template_mgr.set_event_emitter(self.emit)
+            logger.debug("[CoreAPI] 已向 TemplateManager 注入事件推送能力")
+
+        logger.info("[CoreAPI] 执行器注册完成")
+    
+    # ==================== 属性访问 ====================
+    
+    @property
+    def config_manager(self):
+        """获取配置管理器"""
+        return self._config_manager
+    
+    @property
+    def ocr_engine(self):
+        """获取 OCR 引擎实例"""
+        return self._ocr_engine
+    
+    @property
+    def result_manager(self):
+        """获取结果管理器"""
+        return self._result_manager
+    
+    # ==================== 引擎状态推送机制 ====================
+
+    def on_engine_status_changed(self, callback: Callable):
+        """注册引擎状态变更回调（核心模块 → 界面层的推送通道）
+
+        Args:
+            callback: 回调函数，签名为 callback(status: str, error: Optional[str])
+                       status: 'not_initialized' | 'initializing' | 'ready' | 'error'
         """
-        初始化核心API
+        if callback not in self._engine_status_callbacks:
+            self._engine_status_callbacks.append(callback)
+            logger.debug("[CoreAPI] 注册引擎状态回调: %s", callback.__name__ if hasattr(callback, '__name__') else 'anonymous')
+
+    def _set_engine_status(self, status: str, error: Optional[str] = None):
+        """设置引擎状态并推送变更通知（内部方法）
+
+        所有 _ocr_engine_status 的修改都必须通过此方法，确保界面层收到推送。
+        """
+        old_status = self._ocr_engine_status
+        self._ocr_engine_status = status
+        self._ocr_engine_error = error
+        logger.info("[CoreAPI] 引擎状态变更: %s → %s", old_status, status)
+        # 推送通知到所有订阅者
+        for cb in self._engine_status_callbacks:
+            try:
+                cb(status, error)
+            except Exception as e:
+                logger.warning("[CoreAPI] 引擎状态回调异常: %s", e)
+
+    # ==================== 引擎心跳守护 ====================
+
+    def _heartbeat_check(self):
+        """引擎心跳检测（定时器回调，主线程执行）
+        
+        检测引擎子进程是否存活。如果进程意外死亡：
+        1. 推送 process_died 事件到 UI
+        2. 自动重新初始化引擎
+        """
+        if self._ocr_engine_status != 'ready':
+            return  # 引擎非就绪状态，不检测
+        
+        if self._ocr_engine is None:
+            return
+        
+        if not self._ocr_engine._is_process_alive():
+            logger.warning("[CoreAPI] 心跳检测：引擎子进程已死亡！")
+            self._ocr_engine._initialized = False
+            self._set_engine_status('not_initialized')
+            self.emit("engine:event", type="process_died")
+            
+            if self._heartbeat_auto_restart:
+                logger.info("[CoreAPI] 自动重新初始化引擎...")
+                self._heartbeat_timer.stop()
+                self.submit_ocr_init_task(
+                    on_complete=lambda data: logger.info("[CoreAPI] 引擎自动重启成功"),
+                    on_error=lambda msg: logger.error("[CoreAPI] 引擎自动重启失败: %s", msg)
+                )
+
+    # ==================== EventBus 事件频道 ====================
+
+    def on(self, channel: str, callback: Callable[[dict], None]) -> None:
+        """订阅事件频道
+
+        Args:
+            channel: 事件频道名称（如 "engine:event", "result:event", "template:event"）
+            callback: 回调函数，签名为 callback(data: dict)
+        """
+        if channel not in self._event_channels:
+            self._event_channels[channel] = []
+        if callback not in self._event_channels[channel]:
+            self._event_channels[channel].append(callback)
+            logger.debug("[CoreAPI] 订阅事件频道 '%s': %s",
+                         channel,
+                         callback.__name__ if hasattr(callback, '__name__') else 'anonymous')
+
+    def emit(self, channel: str, **data) -> None:
+        """向事件频道推送事件
+
+        遍历该频道的所有回调并执行，每个回调用 try/except 包裹，
+        防止单个回调异常影响其他订阅者。
+
+        Args:
+            channel: 事件频道名称
+            **data:  事件数据，作为 dict 传给回调
+        """
+        callbacks = self._event_channels.get(channel, [])
+        if not callbacks:
+            return
+        # 记录事件推送（结果更新太频繁用 debug 级别，其他用 info 级别）
+        event_type = data.get("type", "")
+        if channel.startswith("result:"):
+            logger.debug("[CoreAPI] EventBus 推送: %s → %s (订阅者: %d)", channel, event_type, len(callbacks))
+        else:
+            logger.info("[CoreAPI] EventBus 推送: %s → %s (订阅者: %d)", channel, event_type, len(callbacks))
+        for cb in callbacks:
+            try:
+                cb(data)
+            except Exception as e:
+                logger.warning("[CoreAPI] 事件频道 '%s' 回调异常: %s", channel, e)
+
+    def off(self, channel: str, callback: Callable) -> None:
+        """取消订阅事件频道
+
+        Args:
+            channel:  事件频道名称
+            callback: 要移除的回调函数
+        """
+        callbacks = self._event_channels.get(channel, [])
+        if callback in callbacks:
+            callbacks.remove(callback)
+            logger.debug("[CoreAPI] 取消订阅事件频道 '%s'", channel)
+
+    # ==================== 状态查询接口 ====================
+    
+    def is_ocr_engine_ready(self) -> bool:
+        """
+        检查 OCR 引擎是否已就绪（三重检查：状态标志 + 引擎初始化状态 + 进程存活）
+        
+        Returns:
+            bool: 引擎真正可用返回 True，否则返回 False
+        """
+        if self._ocr_engine_status != 'ready':
+            return False
+        # 二次校验：引擎实例确实存在且已初始化
+        if self._ocr_engine is None or not self._ocr_engine._initialized:
+            return False
+        # ★ 三重校验：子进程是否仍在运行（防止用户强杀进程）
+        if not self._ocr_engine._is_process_alive():
+            logger.warning("[CoreAPI] 引擎子进程已死亡，重置状态")
+            self._ocr_engine._initialized = False
+            self._set_engine_status('not_initialized')
+            # 通过 EventBus 推送进程死亡事件
+            self.emit("engine:event", type="process_died")
+            return False
+        return True
+    
+    def get_ocr_engine_status(self) -> str:
+        """
+        获取 OCR 引擎详细状态（含进程存活校验）
+        
+        Returns:
+            str: 'ready' | 'not_initialized' | 'initializing' | 'error'
+        """
+        # 状态标志说 ready 但需要深层校验
+        if self._ocr_engine_status == 'ready':
+            if self._ocr_engine is None or not self._ocr_engine._initialized:
+                self._set_engine_status('not_initialized')
+            elif not self._ocr_engine._is_process_alive():
+                logger.warning("[CoreAPI] 引擎子进程已死亡（状态查询时发现），重置状态")
+                self._ocr_engine._initialized = False
+                self._set_engine_status('not_initialized')
+                self.emit("engine:event", type="process_died")
+        return self._ocr_engine_status
+    
+    def get_engine_status_display_info(self, show_notification: bool = False) -> dict:
+        """
+        获取引擎状态显示信息（供界面层直接使用）
+        
+        界面层可以直接使用返回的信息更新UI，不需要自己做逻辑判断。
         
         Args:
-            use_api_service: 是否使用API服务模式
+            show_notification: 是否显示通知（由界面层传入）
+            
+        Returns:
+            dict: 包含状态图标颜色、状态文本、通知信息等
         """
-        self.use_api_service = use_api_service and API_SERVER_AVAILABLE
+        status = self._ocr_engine_status
         
-        if self.use_api_service:
-            logger.info("Using API service mode")
-            self._init_api_service()
-        else:
-            logger.info("Using direct call mode")
-            self._init_direct_call()
+        if status == 'ready':
+            return {
+                'icon_color': '#4CAF50',
+                'status_text': 'OCR 引擎已就绪',
+                'show_notification': show_notification,
+                'notification_type': 'success',
+                'notification_title': 'OCR 引擎',
+                'notification_message': '引擎初始化成功，可以开始识别',
+            }
+        elif status == 'initializing':
+            return {
+                'icon_color': '#FFC107',
+                'status_text': 'OCR 引擎初始化中...',
+                'show_notification': False,  # 初始化中不需要通知
+                'notification_type': None,
+                'notification_title': None,
+                'notification_message': None,
+            }
+        elif status == 'error':
+            error_msg = self._ocr_engine_error or "未知错误"
+            return {
+                'icon_color': '#F44336',
+                'status_text': 'OCR 引擎初始化失败',
+                'show_notification': show_notification,
+                'notification_type': 'error',
+                'notification_title': 'OCR 引擎',
+                'notification_message': f'引擎初始化失败: {error_msg}',
+            }
+        elif status == 'shutting_down':
+            return {
+                'icon_color': '#FF9800',
+                'status_text': 'OCR 引擎正在关闭...',
+                'show_notification': False,
+                'notification_type': None,
+                'notification_title': None,
+                'notification_message': None,
+            }
+        else:  # 'not_initialized'
+            return {
+                'icon_color': '#9E9E9E',
+                'status_text': 'OCR 引擎未初始化',
+                'show_notification': show_notification,
+                'notification_type': 'warning',
+                'notification_title': 'OCR 引擎',
+                'notification_message': '引擎未初始化，请先配置',
+            }
     
-    def _init_api_service(self):
-        """初始化API服务模式"""
-        # 使用API适配器
-        self.api_adapter = api_adapter
+    def get_current_image(self) -> str:
+        """
+        获取当前选中的图片路径
+        
+        Returns:
+            str: 图片文件路径，如果没有则返回空字符串
+        """
+        return self._current_image_path or ''
     
-    def _init_direct_call(self):
-        """初始化直接调用模式"""
-        # 延迟导入核心模块
-        core_modules = _import_core_modules()
+    def get_batch_files(self) -> list:
+        """
+        获取当前批量文件路径列表
         
-        get_config_manager = core_modules['get_config_manager']
-        OCREngine = core_modules['OCREngine']
-        ResultManager = core_modules['ResultManager']
-        ResultExporter = core_modules['ResultExporter']
-        BatchOcrWorker = core_modules['BatchOcrWorker']
-        get_error_handler = core_modules['get_error_handler']
+        Returns:
+            list: 文件路径列表
+        """
+        return self._batch_file_paths
+    
+    def set_current_image(self, image_path: str):
+        """
+        设置当前图片路径
         
-        self.config_manager = get_config_manager()
+        Args:
+            image_path: 图片文件路径
+        """
+        self._current_image_path = image_path
+    
+    def set_batch_files(self, file_paths: list):
+        """
+        设置批量文件路径列表
         
-        # 从配置管理器获取OCR引擎参数
-        exe_path = self.config_manager.get_ocr_exe_path()
-        models_path = self.config_manager.get_models_path()
-        language = self.config_manager.get_language()
+        Args:
+            file_paths: 文件路径列表
+        """
+        self._batch_file_paths = file_paths
+    
+    # ==================== TaskManager 统一任务调度接口 ====================
+    
+    def submit_ocr_init_task(self,
+                             on_progress: Optional[Callable] = None,
+                             on_complete: Optional[Callable] = None,
+                             on_error: Optional[Callable] = None,
+                             task_id: Optional[str] = None) -> str:
+        """
+        提交 OCR 引擎初始化任务
         
-        self.ocr_engine = OCREngine(
-            exe_path=exe_path,
-            models_path=models_path,
-            language=language
+        Args:
+            on_progress: 进度回调 (TaskResult)
+            on_complete: 完成回调 (TaskResult)，data 包含 {"success": bool, "message": str}
+            on_error: 错误回调 (TaskResult)
+            task_id: 任务ID（可选）
+            
+        Returns:
+            任务ID
+        """
+        from core.task_manager import TaskCallback
+        
+        # 更新状态为"初始化中"
+        self._set_engine_status('initializing')
+        
+        # 创建回调包装器，更新状态
+        def progress_wrapper(task_result):
+            if on_progress:
+                progress = task_result.progress or {}
+                stage = progress.get('stage', '')
+                on_progress(stage)
+        
+        def complete_wrapper(task_result):
+            if task_result.data and task_result.data.get('success'):
+                self._set_engine_status('ready')
+                # ★ 启动引擎心跳守护
+                self._heartbeat_auto_restart = True
+                self._heartbeat_timer.start()
+                logger.info("[CoreAPI] 引擎心跳守护已启动 (间隔: 3s)")
+                if on_complete:
+                    on_complete(task_result.data)
+            else:
+                error_msg = task_result.data.get('message', '未知错误') if task_result.data else '初始化失败'
+                self._set_engine_status('error', error_msg)
+                if on_error:
+                    on_error(error_msg)
+        
+        def error_wrapper(task_result):
+            error_msg = task_result.error or 'OCR引擎初始化异常'
+            self._set_engine_status('error', error_msg)
+            if on_error:
+                on_error(error_msg)
+        
+        # 创建回调
+        callback = TaskCallback(
+            on_progress=progress_wrapper,
+            on_complete=complete_wrapper,
+            on_error=error_wrapper
         )
-        self.result_manager = ResultManager()
-        self.result_exporter = ResultExporter()
-        self.error_handler = get_error_handler()
         
-        # 保存错误处理模块
-        self._error_modules = core_modules
-        # 保存核心组件，用于按需创建batch_worker
-        self._core_components = {
-            'ocr_engine': self.ocr_engine,
-            'result_manager': self.result_manager
+        # 提交任务
+        params = {
+            "check_config": True
         }
         
-        # 验证OCR引擎配置
-        if not self.ocr_engine.check_config():
-            logger.warning("OCR引擎配置不完整，请先配置引擎路径和模型路径")
+        return self.task_manager.submit_task(
+            task_type=TaskType.OCR_INIT,
+            params=params,
+            callback=callback,
+            task_id=task_id
+        )
     
-    # ==================== OCR 识别相关 API ====================
-    
-    def recognize_single_image(self, image_path: str) -> 'ErrorResult':
+    def init_ocr_engine(self, on_progress=None, on_complete=None, on_error=None):
         """
-        识别单张图片
+        初始化 OCR 引擎（异步）
         
         Args:
-            image_path: 图片路径
+            on_progress: 进度回调
+            on_complete: 完成回调，接收 {"success": bool, "message": str}
+            on_error: 错误回调，接收错误信息
             
         Returns:
-            ErrorResult 包含成功状态和数据或错误信息
+            任务ID
         """
-        if self.use_api_service:
-            # 使用API服务模式
-            return self.api_adapter.recognize_single_image(image_path)
+        return self.submit_ocr_init_task(
+            on_progress=on_progress,
+            on_complete=on_complete,
+            on_error=on_error
+        )
+    
+    def submit_ocr_task(self,
+                       image_paths: str | List[str],
+                       on_progress: Optional[Callable] = None,
+                       on_complete: Optional[Callable] = None,
+                       on_error: Optional[Callable] = None,
+                       task_id: Optional[str] = None,
+                       template_id: Optional[str] = None) -> str:
+        """
+        提交 OCR 识别任务（统一接口）
+        
+        Args:
+            image_paths: 单个图片路径或路径列表
+            on_progress: 进度回调 (TaskResult)
+            on_complete: 完成回调 (TaskResult)
+            on_error: 错误回调 (TaskResult)
+            task_id: 任务ID（可选）
+            template_id: 识别模板ID（可选），提供后自动解析识别结果为结构化字段
+            
+        Returns:
+            任务ID
+        """
+        from core.task_manager import TaskType, TaskCallback
+        
+        # 规范化输入
+        if isinstance(image_paths, str):
+            task_type = TaskType.OCR_SINGLE
         else:
-            # 使用直接调用模式
-            try:
-                # 获取错误处理模块
-                error_modules = self._error_modules
-                ErrorResult = error_modules['ErrorResult']
-                EnhancedError = error_modules['EnhancedError']
-                ErrorType = error_modules['ErrorType']
-                
-                # 验证输入
-                if not image_path or not os.path.exists(image_path):
-                    error = EnhancedError(
-                        type=ErrorType.FILE_ERROR,
-                        message="图片路径不存在",
-                        details={"file_path": image_path}
-                    )
-                    return ErrorResult.error_result(error)
-                
-                # 执行识别
-                result = self.ocr_engine.recognize(image_path)
-                
-                if result.get("success", False):
-                    return ErrorResult.success_result(result)
-                else:
-                    error = EnhancedError(
-                        type=ErrorType.OCR_ENGINE_ERROR,
-                        message=result.get("message", "OCR识别失败"),
-                        details={"file_path": image_path, "raw_result": result}
-                    )
-                    return ErrorResult.error_result(error)
-            except Exception as e:
-                error = EnhancedError(
-                    type=ErrorType.OCR_ENGINE_ERROR,
-                    message=f"识别过程异常: {str(e)}",
-                    details={"file_path": image_path, "exception": str(e)}
-                )
-                return ErrorResult.error_result(error)
-    
-    def recognize_auto_slice(self, image_path: str, progress_callback=None, is_interrupted=None) -> 'ErrorResult':
-        """
-        自动识别（支持超长图切片）
+            task_type = TaskType.OCR_BATCH
         
-        Args:
-            image_path: 图片路径
-            progress_callback: 进度回调函数
-            is_interrupted: 中断检查函数
-            
-        Returns:
-            ErrorResult 包含成功状态和数据或错误信息
-        """
-        try:
-            # 获取错误处理模块
-            error_modules = self._error_modules
-            ErrorResult = error_modules['ErrorResult']
-            EnhancedError = error_modules['EnhancedError']
-            ErrorType = error_modules['ErrorType']
-            create_file_error = error_modules['create_file_error']
-            create_ocr_engine_error = error_modules['create_ocr_engine_error']
-            
-            if not image_path or not os.path.exists(image_path):
-                error = create_file_error(f"图片文件不存在: {image_path}", {"file_path": image_path})
-                return ErrorResult.error_result(error)
-            
-            if not self.ocr_engine.check_config():
-                error = create_ocr_engine_error("OCR引擎未正确配置，请先配置引擎路径和模型路径")
-                return ErrorResult.error_result(error)
-            
-            # 执行自动识别（支持切片）
-            result = self.ocr_engine.recognize_auto(
-                image_path, 
-                progress_callback=progress_callback,
-                is_interrupted=is_interrupted
-            )
-            
-            logger.info(f"自动识别完成: {image_path}")
-            return ErrorResult.success_result(result)
-            
-        except Exception as e:
-            logger.error(f"自动识别失败: {str(e)}")
-            cancelled = "中断" in str(e) or (is_interrupted and is_interrupted())
-            error_details = {"file_path": image_path, "cancelled": cancelled}
-            error = create_ocr_engine_error(f"自动识别失败: {str(e)}", error_details)
-            return ErrorResult.error_result(error)
-    
-    def create_batch_worker(self, file_paths: List[str], config: Optional[Dict] = None) -> Any:
-        """
-        创建批量识别工作线程
-        
-        Args:
-            file_paths: 文件路径列表
-            config: 配置参数
-            
-        Returns:
-            批量识别工作线程实例
-        """
-        if self.use_api_service:
-            # 使用API服务模式，返回API适配器的批量识别方法
-            return self.api_adapter.recognize_batch_images_async(file_paths)
-        else:
-            # 使用直接调用模式
-            if config is None:
-                config = {}
-            
-            worker = BatchOcrWorker(
-                ocr_engine=self.ocr_engine,
-                file_paths=file_paths,
-                config=config
-            )
-            
-            return worker
-    
-    def create_api_based_batch_worker(self, file_paths: List[str], config: Optional[Dict] = None):
-        """
-        创建基于CoreAPI的批量识别工作线程
-        
-        Args:
-            file_paths: 文件路径列表
-            config: 配置参数
-            
-        Returns:
-            APIBasedBatchOcrWorker 实例
-        """
-        if config is None:
-            config = {}
-        
-        from core.async_worker import APIBasedBatchOcrWorker
-        worker = APIBasedBatchOcrWorker(
-            core_api=self,
-            file_paths=file_paths,
-            config=config
+        # 创建回调
+        callback = TaskCallback(
+            on_progress=on_progress,
+            on_complete=on_complete,
+            on_error=on_error
         )
         
-        return worker
+        # 提交任务
+        params = {
+            "image_paths": image_paths,
+            "config": None,  # 执行器会从 ConfigManager 获取配置
+            "template_id": template_id,  # 新增：识别模板ID
+        }
+        
+        return self.task_manager.submit_task(
+            task_type=task_type,
+            params=params,
+            callback=callback,
+            task_id=task_id
+        )
     
-    # ==================== 配置管理相关 API ====================
+    def submit_export_task(self,
+                          export_format: str,
+                          file_path: str,
+                          results: List[Dict],
+                          column_headers: Optional[List[str]] = None,
+                          include_original_text: bool = True,
+                          on_progress: Optional[Callable] = None,
+                          on_complete: Optional[Callable] = None,
+                          on_error: Optional[Callable] = None,
+                          task_id: Optional[str] = None) -> str:
+        """
+        提交导出任务
+        
+        Args:
+            export_format: 导出格式 ("TXT", "JSON", "Excel", "CSV")
+            file_path: 输出文件路径
+            results: 要导出的结果列表
+            column_headers: 列头列表（动态列支持，可选）
+            include_original_text: 是否包含原始文本（Excel 导出时使用）
+            on_progress: 进度回调
+            on_complete: 完成回调
+            on_error: 错误回调
+            task_id: 任务ID（可选）
+            
+        Returns:
+            任务ID
+        """
+        from core.task_manager import TaskType, TaskCallback
+        
+        callback = TaskCallback(
+            on_progress=on_progress,
+            on_complete=on_complete,
+            on_error=on_error
+        )
+        
+        params = {
+            "format": export_format,
+            "file_path": file_path,
+            "results": results,
+            "column_headers": column_headers,
+            "include_original_text": include_original_text,  # 新增参数
+        }
+        
+        return self.task_manager.submit_task(
+            task_type=TaskType.EXPORT,
+            params=params,
+            callback=callback,
+            task_id=task_id
+        )
+    
+    def submit_scan_task(self,
+                        directory: str,
+                        recursive: bool = True,
+                        on_progress: Optional[Callable] = None,
+                        on_complete: Optional[Callable] = None,
+                        on_error: Optional[Callable] = None,
+                        task_id: Optional[str] = None) -> str:
+        """
+        提交目录扫描任务
+        
+        Args:
+            directory: 目录路径
+            recursive: 是否递归扫描子目录
+            on_progress: 进度回调
+            on_complete: 完成回调
+            on_error: 错误回调
+            task_id: 任务ID（可选）
+            
+        Returns:
+            任务ID
+        """
+        from core.task_manager import TaskType, TaskCallback
+        
+        callback = TaskCallback(
+            on_progress=on_progress,
+            on_complete=on_complete,
+            on_error=on_error
+        )
+        
+        params = {
+            "directory": directory,
+            "recursive": recursive
+        }
+        
+        return self.task_manager.submit_task(
+            task_type=TaskType.SCAN_DIRECTORY,
+            params=params,
+            callback=callback,
+            task_id=task_id
+        )
+    
+    # ==================== OCR 关闭任务接口 ====================
+    
+    def submit_ocr_shutdown_task(self,
+                                 on_progress: Optional[Callable] = None,
+                                 on_complete: Optional[Callable] = None,
+                                 on_error: Optional[Callable] = None,
+                                 task_id: Optional[str] = None) -> str:
+        """
+        提交 OCR 引擎关闭任务（资源回收）
+        
+        Args:
+            on_progress: 进度回调 (TaskResult)
+            on_complete: 完成回调 (TaskResult)，data 包含 {"success": bool, "message": str}
+            on_error: 错误回调 (TaskResult)
+            task_id: 任务ID（可选）
+            
+        Returns:
+            任务ID
+        """
+        from core.task_manager import TaskCallback
+        
+        # ★ 停止心跳守护（用户主动关闭，不需要自动重启）
+        self._heartbeat_auto_restart = False
+        self._heartbeat_timer.stop()
+        self._set_engine_status('shutting_down')
+        logger.info("[CoreAPI] 引擎心跳守护已停止（用户主动关闭）")
+        
+        # 创建回调包装器
+        def progress_wrapper(task_result):
+            if on_progress:
+                progress = task_result.progress or {}
+                stage = progress.get('stage', '')
+                on_progress(stage)
+        
+        def complete_wrapper(task_result):
+            if task_result.data and task_result.data.get('success'):
+                if on_complete:
+                    on_complete(task_result.data)
+            else:
+                error_msg = task_result.data.get('message', '关闭失败') if task_result.data else '任务失败'
+                if on_error:
+                    on_error(error_msg)
+        
+        def error_wrapper(task_result):
+            if on_error:
+                on_error(task_result.error or 'OCR关闭任务异常')
+        
+        # 创建回调
+        callback = TaskCallback(
+            on_progress=progress_wrapper,
+            on_complete=complete_wrapper,
+            on_error=error_wrapper
+        )
+        
+        # 提交任务
+        params = {}
+        
+        return self.task_manager.submit_task(
+            task_type=TaskType.OCR_SHUTDOWN,
+            params=params,
+            callback=callback,
+            task_id=task_id
+        )
+    
+    def scan_folder(self, folder_path: str, on_progress=None, on_complete=None, on_error=None):
+        """
+        扫描文件夹（异步）
+        
+        Args:
+            folder_path: 文件夹路径
+            on_progress: 进度回调
+            on_complete: 完成回调，接收文件列表
+            on_error: 错误回调，接收错误信息
+            
+        Returns:
+            任务ID
+        """
+        return self.submit_scan_task(
+            directory=folder_path,
+            recursive=self._config_manager.get_scan_subdirs(),
+            on_progress=on_progress,
+            on_complete=on_complete,
+            on_error=on_error
+        )
+    
+    def cancel_task(self, task_id: str) -> bool:
+        """
+        取消任务
+        
+        Args:
+            task_id: 任务ID
+            
+        Returns:
+            是否成功取消
+        """
+        return self.task_manager.cancel_task(task_id)
+    
+    def get_task_status(self, task_id: str):
+        """
+        获取任务状态
+        
+        Args:
+            task_id: 任务ID
+            
+        Returns:
+            TaskStatus 或 None
+        """
+        return self.task_manager.get_task_status(task_id)
+    
+    def get_running_tasks(self) -> List:
+        """获取正在运行的任务列表"""
+        return self.task_manager.get_running_tasks()
+    
+    def clear_completed_tasks(self):
+        """清理已完成的任务记录"""
+        self.task_manager.clear_completed_tasks()
+    
+    def connect_task_signals(self,
+                            on_progress: Optional[Callable] = None,
+                            on_complete: Optional[Callable] = None,
+                            on_error: Optional[Callable] = None,
+                            on_cancelled: Optional[Callable] = None):
+        """
+        连接任务管理器全局信号（适用于需要监听所有任务的场景）
+        
+        Args:
+            on_progress: 进度信号回调
+            on_complete: 完成信号回调
+            on_error: 错误信号回调
+            on_cancelled: 取消信号回调
+        """
+        if on_progress:
+            self.task_manager.task_progress.connect(on_progress)
+        if on_complete:
+            self.task_manager.task_completed.connect(on_complete)
+        if on_error:
+            self.task_manager.task_failed.connect(on_error)
+        if on_cancelled:
+            self.task_manager.task_cancelled.connect(on_cancelled)
+    
+    # ==================== 配置管理相关接口 ====================
     
     def get_config(self, key: str, default: Any = None) -> Any:
         """
@@ -290,7 +800,9 @@ class CoreAPI:
         Returns:
             配置值
         """
-        return self.config_manager.get(key, default)
+        from core.config import get_config_manager
+        config_manager = get_config_manager()
+        return config_manager.get(key, default)
     
     def set_config(self, key: str, value: Any) -> bool:
         """
@@ -303,47 +815,9 @@ class CoreAPI:
         Returns:
             是否设置成功
         """
-        return self.config_manager.set(key, value)
-    
-    def get_ocr_config(self) -> Dict[str, Any]:
-        """
-        获取OCR相关配置
-        
-        Returns:
-            OCR配置字典
-        """
-        return {
-            "ocr_exe_path": self.config_manager.get_ocr_exe_path(),
-            "models_path": self.config_manager.get_models_path(),
-            "language": self.config_manager.get_language(),
-            "confidence_threshold": self.config_manager.get_confidence_threshold(),
-            "auto_detect": self.config_manager.get_auto_detect(),
-            "long_image_mode": self.config_manager.get_long_image_mode(),
-            "slice_height": self.config_manager.get_slice_height(),
-            "slice_overlap": self.config_manager.get_slice_overlap(),
-        }
-    
-    def set_ocr_config(self, config: Dict[str, Any]) -> bool:
-        """
-        设置OCR相关配置
-        
-        Args:
-            config: OCR配置字典
-            
-        Returns:
-            是否设置成功
-        """
-        try:
-            # 批量设置配置
-            for key, value in config.items():
-                if hasattr(self.config_manager, f'set_{key}'):
-                    setter = getattr(self.config_manager, f'set_{key}')
-                    setter(value)
-            
-            return True
-        except Exception as e:
-            logger.error(f"设置OCR配置失败: {str(e)}")
-            return False
+        from core.config import get_config_manager
+        config_manager = get_config_manager()
+        return config_manager.set(key, value)
     
     def check_ocr_config(self) -> bool:
         """
@@ -352,18 +826,11 @@ class CoreAPI:
         Returns:
             配置是否完整
         """
-        return self.ocr_engine.check_config()
+        from core.config import get_config_manager
+        config_manager = get_config_manager()
+        return config_manager.check_config()
     
-    def auto_detect_paths(self) -> Dict[str, Any]:
-        """
-        自动检测OCR引擎路径
-        
-        Returns:
-            检测结果字典
-        """
-        return self.config_manager.auto_detect_paths()
-    
-    # ==================== 结果管理相关 API ====================
+    # ==================== 结果管理相关接口 ====================
     
     def get_history_results(self, limit: int = 50) -> List[Dict[str, Any]]:
         """
@@ -375,54 +842,9 @@ class CoreAPI:
         Returns:
             历史结果列表
         """
-        return self.result_manager.get_history(limit)
-    
-    def get_history_by_date(self, date_str: str) -> List[Dict[str, Any]]:
-        """
-        按日期获取历史结果
-
-        Args:
-            date_str: 日期字符串 (YYYY-MM-DD)
-
-        Returns:
-            历史结果列表
-        """
-        # 过滤出指定日期的历史记录
-        all_history = self.result_manager.get_history(limit=None)  # 获取全部
-        return [
-            item for item in all_history
-            if item.get('time', '').startswith(date_str)
-        ]
-    
-    def delete_history_item(self, item_id: str) -> bool:
-        """
-        删除历史记录项（按显示顺序索引删除）
-
-        Args:
-            item_id: 记录ID（此参数已废弃，改为按索引删除）
-
-        Returns:
-            是否删除成功
-        """
-        # item_id 在历史页面中实际传的是显示顺序索引（从新到旧）
-        try:
-            index = int(item_id) if item_id else -1
-            return self.result_manager.delete_history(index)
-        except (ValueError, TypeError):
-            logger.warning(f"删除历史记录项失败：无效的索引 {item_id}")
-            return False
-    
-    def delete_history_by_index(self, index: int) -> bool:
-        """
-        按索引删除历史记录（显示顺序索引，从新到旧）
-
-        Args:
-            index: 显示顺序索引（0 = 最新）
-
-        Returns:
-            是否删除成功
-        """
-        return self.result_manager.delete_history(index)
+        from core.result_manager import get_result_manager
+        result_manager = get_result_manager()
+        return result_manager.get_history(limit)
     
     def clear_all_history(self) -> bool:
         """
@@ -431,287 +853,703 @@ class CoreAPI:
         Returns:
             是否清空成功
         """
-        return self.result_manager.clear_all()
+        from core.result_manager import get_result_manager
+        result_manager = get_result_manager()
+        return result_manager.clear_all()
     
-    def export_history(self, export_format: str, file_path: str) -> 'ErrorResult':
+    def delete_history_by_index(self, index: int) -> bool:
         """
-        导出历史记录
+        根据索引删除历史记录
         
         Args:
-            export_format: 导出格式 ("TXT", "JSON", "Excel")
-            file_path: 输出文件路径
+            index: 历史记录索引
             
         Returns:
-            ErrorResult 包含成功状态和数据或错误信息
+            是否删除成功
         """
-        try:
-            # 获取错误处理模块
-            error_modules = self._error_modules
-            ErrorResult = error_modules['ErrorResult']
-            create_export_error = error_modules['create_export_error']
-            
-            # 验证导出格式
-            supported_formats = ["TXT", "JSON", "Excel", "CSV"]
-            if export_format.upper() not in supported_formats:
-                error = create_export_error(f"不支持的导出格式: {export_format}", {"format": export_format})
-                return ErrorResult.error_result(error)
-            
-            # 验证输出路径
-            output_dir = os.path.dirname(file_path)
-            if output_dir and not os.path.exists(output_dir):
-                error = create_export_error(f"输出目录不存在: {output_dir}", {"output_path": file_path})
-                return ErrorResult.error_result(error)
-            
-            history_items = self.result_manager.get_history(limit=None)
-            exporter = ResultExporter()
-            exporter.load_from_history(history_items)
-            success = exporter.export(export_format, file_path)
-            
-            if success:
-                logger.info(f"历史记录导出成功: {file_path}")
-                return ErrorResult.success_result({"export_path": file_path, "format": export_format})
-            else:
-                error = create_export_error("导出失败，可能是文件写入权限问题", {"output_path": file_path})
-                return ErrorResult.error_result(error)
-                
-        except Exception as e:
-            logger.error(f"导出历史记录失败: {str(e)}")
-            error = create_export_error(f"导出历史记录失败: {str(e)}", {"output_path": file_path})
-            return ErrorResult.error_result(error)
+        from core.result_manager import get_result_manager
+        result_manager = get_result_manager()
+        return result_manager.delete_history(index)
     
-    def export_batch_results(self, batch_results: List[Dict], export_format: str, file_path: str) -> 'ErrorResult':
-        """
-        导出批量识别结果
-        
+    # ==================== 数据处理（供 UI 层调用） ====================
+
+    def get_ocr_result_display_info(self, result_item: dict) -> dict:
+        """将单个 result_item 转换为 UI 显示数据
+
         Args:
-            batch_results: 批量识别结果列表
-            export_format: 导出格式 ("TXT", "JSON", "Excel")
-            file_path: 输出文件路径
-            
+            result_item: 执行器返回的 {"file_path": str, "file_name": str, "result": dict}
+
         Returns:
-            ErrorResult 包含成功状态和数据或错误信息
+            {
+                "file_name": str,       # 文件名
+                "text": str,            # 识别文本（成功时）或空字符串
+                "is_success": bool,     # 是否识别成功
+                "error_msg": str,       # 错误信息（失败时）或空字符串
+                "extracted_text": str,  # 提取字段文本或空字符串
+            }
         """
-        if self.use_api_service:
-            # 使用API服务模式
-            return self.api_adapter.export_results(export_format, file_path, batch_results)
+        ocr_result = result_item.get('result', {}) or {}
+        file_name = result_item.get('file_name', '') or os.path.basename(result_item.get('file_path', ''))
+        is_success = ocr_result.get('success', False)
+
+        if is_success:
+            texts = ocr_result.get('texts', [])
+            text = '\n'.join(texts) if texts else ''
+            raw_data = ocr_result.get('data', [])
+            error_msg = ''
         else:
-            # 使用直接调用模式
-            try:
-                # 获取错误处理模块
-                error_modules = self._error_modules
-                ErrorResult = error_modules['ErrorResult']
-                create_export_error = error_modules['create_export_error']
-                
-                # 验证导出格式
-                supported_formats = ["TXT", "JSON", "Excel", "CSV"]
-                if export_format.upper() not in supported_formats:
-                    error = create_export_error(f"不支持的导出格式: {export_format}", {"format": export_format})
-                    return ErrorResult.error_result(error)
-                
-                # 验证输出路径
-                output_dir = os.path.dirname(file_path)
-                if output_dir and not os.path.exists(output_dir):
-                    error = create_export_error(f"输出目录不存在: {output_dir}", {"output_path": file_path})
-                    return ErrorResult.error_result(error)
-                
-                # 从批量结果中提取实际的识别结果
-                results_for_export = []
-                for item in batch_results:
-                    result = item.get('result', {})
-                    if result:
-                        # 构造导出所需的数据格式
-                        export_item = {
-                            'file_path': item.get('file_path', ''),
-                            'result': result,
-                            'texts': result.get('texts', []),
-                            'boxes': result.get('boxes', []),
-                            'code': result.get('code', 100),
-                            'time': item.get('time', '')  # 如果有时间信息
-                        }
-                        results_for_export.append(export_item)
-                
-                exporter = ResultExporter(results_for_export)
-                success = exporter.export(export_format, file_path)
-                
-                if success:
-                    logger.info(f"批量结果导出成功: {file_path}")
-                    return ErrorResult.success_result({"export_path": file_path, "format": export_format})
-                else:
-                    error = create_export_error("导出失败，可能是文件写入权限问题", {"output_path": file_path})
-                    return ErrorResult.error_result(error)
-                    
-            except Exception as e:
-                logger.error(f"导出批量结果失败: {str(e)}")
-                error = create_export_error(f"导出批量结果失败: {str(e)}", {"output_path": file_path})
-                return ErrorResult.error_result(error)
-    
-    # ==================== 文件处理相关 API ====================
-    
-    def validate_image_file(self, file_path: str) -> Tuple[bool, str]:
-        """
-        验证图片文件
-        
+            text = ''
+            raw_data = ocr_result.get('data', '识别失败')
+            error_msg = raw_data if isinstance(raw_data, str) else '识别失败'
+
+        # extracted 字段在 result_item 上，不在 ocr_result 里
+        extracted = result_item.get('extracted', {})
+        if extracted:
+            extracted_text = '\n'.join([f"{k}: {v}" for k, v in extracted.items()])
+        else:
+            extracted_text = ''
+
+        return {
+            'file_name': file_name,
+            'text': text,
+            'is_success': is_success,
+            'error_msg': error_msg,
+            'extracted_text': extracted_text,
+        }
+
+    def get_ocr_summary(self, results: list) -> dict:
+        """统计识别结果摘要
+
         Args:
-            file_path: 文件路径
-            
+            results: 执行器返回的 result_item 列表
+
         Returns:
-            (是否有效, 错误信息)
+            {
+                "success_count": int,   # 成功数量
+                "total_count": int,     # 总数量
+                "summary_text": str,    # 摘要文本（如 "成功识别 8/10 个文件"）
+            }
         """
-        if not os.path.exists(file_path):
-            return False, "文件不存在"
-        
-        if not os.path.isfile(file_path):
-            return False, "路径不是文件"
-        
-        # 检查文件扩展名
-        valid_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp', '.tiff', '.tif'}
-        ext = os.path.splitext(file_path)[1].lower()
-        if ext not in valid_extensions:
-            return False, f"不支持的文件格式: {ext}"
-        
-        # 检查文件大小（限制在100MB以内）
-        file_size = os.path.getsize(file_path)
-        if file_size > 100 * 1024 * 1024:  # 100MB
-            return False, "文件过大（超过100MB）"
-        
-        return True, ""
-    
-    def scan_directory_images(self, directory: str, recursive: bool = True) -> List[str]:
+        total = len(results)
+        success_count = sum(1 for r in results if r.get('result', {}).get('success', False))
+        return {
+            'success_count': success_count,
+            'total_count': total,
+            'summary_text': f"成功识别 {success_count}/{total} 个文件",
+        }
+
+    def get_ocr_template_names(self) -> Dict[str, str]:
         """
-        扫描目录中的图片文件
-        
+        获取所有 OCR 解析模板 {id: name}（供 UI 下拉框使用）
+
+        Returns:
+            模板ID -> 模板名称的字典
+        """
+        from core.template_manager import get_template_manager
+        return get_template_manager().get_template_names()
+
+    def get_export_default_name(self, is_batch: bool, image_path: str = '', ext: str = 'txt') -> str:
+        """生成导出默认文件名
+
         Args:
-            directory: 目录路径
-            recursive: 是否递归扫描子目录
-            
+            is_batch: 是否批量模式
+            image_path: 单图模式下的图片路径
+            ext: 文件扩展名
+
         Returns:
-            图片文件路径列表
+            默认文件名字符串
         """
-        if not os.path.exists(directory) or not os.path.isdir(directory):
-            return []
-        
-        image_files = []
-        valid_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp', '.tiff', '.tif'}
-        
-        if recursive:
-            for root, dirs, files in os.walk(directory):
+        if is_batch:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            return f"OCR结果_批量_{timestamp}.{ext}"
+        elif image_path:
+            image_name = os.path.basename(image_path)
+            name_without_ext = os.path.splitext(image_name)[0]
+            return f"{name_without_ext}_OCR结果.{ext}"
+        else:
+            return f"OCR结果.{ext}"
+
+    def get_current_filename(self, file_path: str) -> str:
+        """从文件路径提取文件名（供 UI 层显示用）
+
+        Args:
+            file_path: 完整文件路径
+
+        Returns:
+            文件名
+        """
+        return os.path.basename(file_path)
+
+    def classify_dropped_paths(self, file_paths: list) -> dict:
+        """分类拖放的文件路径（供 UI 层调用）
+
+        Args:
+            file_paths: 拖放的文件路径列表
+
+        Returns:
+            {
+                "folder_paths": list,       # 文件夹路径
+                "image_files": list,        # 图片文件路径
+                "folder_images": list,      # 文件夹中扫描到的图片
+                "first_folder": str or None # 第一个文件夹路径
+            }
+        """
+        IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff', '.tif', '.webp', '.ico', '.pdf'}
+
+        folder_paths = [p for p in file_paths if os.path.isdir(p)]
+        image_files = [p for p in file_paths if os.path.isfile(p) and os.path.splitext(p)[1].lower() in IMAGE_EXTENSIONS]
+
+        folder_images = []
+        first_folder = folder_paths[0] if folder_paths else None
+        if first_folder:
+            for root, dirs, files in os.walk(first_folder):
                 for file in files:
-                    if os.path.splitext(file)[1].lower() in valid_extensions:
-                        image_files.append(os.path.join(root, file))
-        else:
-            for file in os.listdir(directory):
-                file_path = os.path.join(directory, file)
-                if os.path.isfile(file_path) and os.path.splitext(file)[1].lower() in valid_extensions:
-                    image_files.append(file_path)
-        
-        return sorted(image_files)
-    
-    # ==================== 系统相关 API ====================
-    
-    def update_ocr_language(self, language: str) -> bool:
-        """
-        更新OCR引擎语言设置
-        
+                    if os.path.splitext(file)[1].lower() in IMAGE_EXTENSIONS:
+                        folder_images.append(os.path.join(root, file))
+
+        return {
+            'folder_paths': folder_paths,
+            'image_files': image_files,
+            'folder_images': folder_images,
+            'first_folder': first_folder,
+        }
+
+    def get_export_result_display_info(self, task_result_data) -> dict:
+        """从导出任务结果提取 UI 显示信息
+
         Args:
-            language: 语言设置
-            
+            task_result_data: 导出任务返回的数据
+
         Returns:
-            是否更新成功
+            {
+                "is_success": bool,
+                "saved_path": str,
+                "error_msg": str,
+            }
         """
+        if not task_result_data:
+            return {'is_success': False, 'saved_path': '', 'error_msg': '导出任务未完成'}
+
+        return {
+            'is_success': bool(task_result_data.get('success', False)),
+            'saved_path': task_result_data.get('file_path', ''),
+            'error_msg': task_result_data.get('message', '导出任务未完成'),
+        }
+
+    def get_batch_folder_display_name(self, folder_path: str, file_paths: list) -> str:
+        """获取批量模式的文件夹显示名称（供 UI 层显示用）
+
+        Args:
+            folder_path: 文件夹路径（可能为空）
+            file_paths: 文件路径列表
+
+        Returns:
+            显示名称
+        """
+        if folder_path and os.path.isdir(folder_path):
+            return os.path.basename(folder_path)
+        elif file_paths:
+            common_dir = os.path.dirname(file_paths[0])
+            return os.path.basename(common_dir) or common_dir
+        else:
+            return "多个文件"
+
+    def get_batch_folder_path(self, file_paths: list) -> str:
+        """从文件路径列表提取共同目录（供 UI 层使用）
+
+        Args:
+            file_paths: 文件路径列表
+
+        Returns:
+            共同目录路径
+        """
+        if file_paths:
+            return os.path.dirname(file_paths[0])
+        return ""
+
+    # ==================== Excel 数据处理接口 ====================
+
+    # ── 任务提交接口 ──
+
+    def submit_excel_load_task(self,
+                               file_paths: List[str],
+                               sheet_name: Optional[str] = None,
+                               use_columns: Optional[List[str]] = None,
+                               preview_only: bool = True,
+                               on_progress: Optional[Callable] = None,
+                               on_complete: Optional[Callable] = None,
+                               on_error: Optional[Callable] = None,
+                               task_id: Optional[str] = None) -> str:
+        """
+        提交 Excel 加载任务
+
+        Args:
+            file_paths:     Excel 文件路径列表
+            sheet_name:    Sheet 名称（None = 第一个 sheet）
+            use_columns:   选用的列（None = 全部）
+            preview_only:   True = 只加载前 200 行（快速预览）
+            on_progress:   进度回调
+            on_complete:   完成回调，接收 {"tables": [...], "total_rows": int}
+            on_error:      错误回调
+            task_id:       任务ID（可选）
+
+        Returns:
+            任务ID
+        """
+        from core.task_manager import TaskCallback
+
+        callback = TaskCallback(
+            on_progress=on_progress,
+            on_complete=on_complete,
+            on_error=on_error,
+        )
+
+        params = {
+            "file_paths": file_paths,
+            "sheet_name": sheet_name,
+            "use_columns": use_columns,
+            "preview_only": preview_only,
+        }
+
+        return self.task_manager.submit_task(
+            task_type=TaskType.EXCEL_LOAD,
+            params=params,
+            callback=callback,
+            task_id=task_id
+        )
+
+    def submit_excel_clean_task(self,
+                                tables_json: List[str],
+                                clean_rules: List[Dict],
+                                on_progress: Optional[Callable] = None,
+                                on_complete: Optional[Callable] = None,
+                                on_error: Optional[Callable] = None,
+                                task_id: Optional[str] = None) -> str:
+        """
+        提交数据清洗任务
+
+        Args:
+            tables_json:  已加载表的 full_df_json 列表
+            clean_rules: CleanRule 的 dict 列表
+            on_progress: 进度回调
+            on_complete: 完成回调，接收 {"cleaned_df_json": str, "original_rows": int, ...}
+            on_error:    错误回调
+            task_id:     任务ID（可选）
+
+        Returns:
+            任务ID
+        """
+        from core.task_manager import TaskCallback
+
+        callback = TaskCallback(
+            on_progress=on_progress,
+            on_complete=on_complete,
+            on_error=on_error,
+        )
+
+        params = {
+            "tables_json": tables_json,
+            "clean_rules": clean_rules,
+        }
+
+        return self.task_manager.submit_task(
+            task_type=TaskType.EXCEL_CLEAN,
+            params=params,
+            callback=callback,
+            task_id=task_id
+        )
+
+    def submit_excel_pivot_task(self,
+                                tables_json: List[str],
+                                pivot_config: Dict,
+                                merge_keys: Optional[List[str]] = None,
+                                on_progress: Optional[Callable] = None,
+                                on_complete: Optional[Callable] = None,
+                                on_error: Optional[Callable] = None,
+                                task_id: Optional[str] = None) -> str:
+        """
+        提交透视表生成任务
+
+        Args:
+            tables_json:   已加载表的 full_df_json 列表
+            pivot_config:  PivotConfig 的 dict 表示
+            merge_keys:    多表合并键列（空=纵向合并）
+            on_progress:  进度回调
+            on_complete:  完成回调，接收 {"result_df_json": str, "row_count": int, ...}
+            on_error:     错误回调
+            task_id:      任务ID（可选）
+
+        Returns:
+            任务ID
+        """
+        from core.task_manager import TaskCallback
+
+        callback = TaskCallback(
+            on_progress=on_progress,
+            on_complete=on_complete,
+            on_error=on_error,
+        )
+
+        params = {
+            "tables_json": tables_json,
+            "pivot_config": pivot_config,
+            "merge_keys": merge_keys or [],
+        }
+
+        return self.task_manager.submit_task(
+            task_type=TaskType.EXCEL_PIVOT,
+            params=params,
+            callback=callback,
+            task_id=task_id
+        )
+
+    def submit_excel_export_task(self,
+                                 result_df_json: str,
+                                 file_path: str,
+                                 export_format: str = "xlsx",
+                                 on_progress: Optional[Callable] = None,
+                                 on_complete: Optional[Callable] = None,
+                                 on_error: Optional[Callable] = None,
+                                 task_id: Optional[str] = None) -> str:
+        """
+        提交 Excel 导出任务
+
+        Args:
+            result_df_json: 透视结果的 df_json 字符串
+            file_path:     输出文件路径
+            export_format: 导出格式 "xlsx" | "csv"
+            on_progress:   进度回调
+            on_complete:   完成回调，接收 {"success": bool, "file_path": str, ...}
+            on_error:      错误回调
+            task_id:       任务ID（可选）
+
+        Returns:
+            任务ID
+        """
+        from core.task_manager import TaskCallback
+
+        callback = TaskCallback(
+            on_progress=on_progress,
+            on_complete=on_complete,
+            on_error=on_error,
+        )
+
+        params = {
+            "result_df_json": result_df_json,
+            "file_path": file_path,
+            "format": export_format,
+        }
+
+        return self.task_manager.submit_task(
+            task_type=TaskType.EXCEL_EXPORT,
+            params=params,
+            callback=callback,
+            task_id=task_id
+        )
+
+    # ── 数据处理（供 UI 层同步调用）──
+
+    def get_excel_sheet_names(self, file_path: str) -> List[str]:
+        """
+        获取 Excel 文件的 sheet 名称列表（同步，快速）
+
+        Args:
+            file_path: Excel 文件路径
+
+        Returns:
+            sheet 名称列表
+        """
+        from core.excel_processor import get_excel_sheet_names
+        return get_excel_sheet_names(file_path)
+
+    def get_excel_column_names(self, file_path: str,
+                               sheet_name: Optional[str] = None,
+                               nrows: int = 0) -> List[str]:
+        """
+        获取指定 sheet 的列名列表（同步，快速）
+
+        Args:
+            file_path:   Excel 文件路径
+            sheet_name: Sheet 名称（None = 第一个）
+            nrows:      0 = 只读取表头
+
+        Returns:
+            列名列表
+        """
+        from core.excel_processor import get_excel_column_names
+        return get_excel_column_names(file_path, sheet_name, nrows)
+
+    def get_loaded_tables_info(self, loaded_tables: List[Dict]) -> List[Dict]:
+        """
+        获取已加载表的信息摘要（供 UI 显示）
+
+        Args:
+            loaded_tables: submit_excel_load_task 返回的每个表的 info dict
+
+        Returns:
+            [{"file_path": str, "sheet_name": str, "row_count": int, "columns": List[str]}]
+        """
+        return [
+            {
+                "file_path": t.get("file_path", ""),
+                "sheet_name": t.get("sheet_name", ""),
+                "row_count": t.get("row_count", 0),
+                "columns": t.get("columns", []),
+            }
+            for t in loaded_tables
+        ]
+
+    def get_clean_result_display_info(self, task_result_data: Dict) -> Dict:
+        """
+        从清洗任务结果提取 UI 显示信息
+
+        Args:
+            task_result_data: 清洗任务返回的数据
+
+        Returns:
+            {"original_rows": int, "cleaned_rows": int, "removed_rows": int, "columns": List[str]}
+        """
+        if not task_result_data:
+            return {"original_rows": 0, "cleaned_rows": 0, "removed_rows": 0, "columns": []}
+
+        return {
+            "original_rows": task_result_data.get("original_rows", 0),
+            "cleaned_rows": task_result_data.get("cleaned_rows", 0),
+            "removed_rows": task_result_data.get("removed_rows", 0),
+            "columns": task_result_data.get("columns", []),
+        }
+
+    def get_pivot_result_display_info(self, task_result_data: Dict) -> Dict:
+        """
+        从透视任务结果提取 UI 显示信息
+
+        Args:
+            task_result_data: 透视任务返回的数据
+
+        Returns:
+            {"row_count": int, "col_count": int, "columns": List[str], "result_df_json": str}
+        """
+        if not task_result_data:
+            return {"row_count": 0, "col_count": 0, "columns": [], "result_df_json": ""}
+
+        return {
+            "row_count": task_result_data.get("row_count", 0),
+            "col_count": task_result_data.get("col_count", 0),
+            "columns": task_result_data.get("columns", []),
+            "result_df_json": task_result_data.get("result_df_json", ""),
+        }
+
+    def get_excel_export_display_info(self, task_result_data: Dict) -> Dict:
+        """
+        从导出任务结果提取 UI 显示信息
+
+        Args:
+            task_result_data: 导出任务返回的数据
+
+        Returns:
+            {"is_success": bool, "saved_path": str, "error_msg": str}
+        """
+        if not task_result_data:
+            return {"is_success": False, "saved_path": "", "error_msg": "导出任务未完成"}
+
+        return {
+            "is_success": bool(task_result_data.get("success", False)),
+            "saved_path": task_result_data.get("file_path", ""),
+            "error_msg": "" if task_result_data.get("success") else "导出失败",
+        }
+
+    # ── 透视规则模板管理 ──
+
+    def save_pivot_template(self, config: 'PivotConfig') -> bool:
+        """
+        保存透视配置为模板（JSON 文件）
+
+        Args:
+            config: PivotConfig 对象
+
+        Returns:
+            是否保存成功
+        """
+        import json
+        import os
+        from pathlib import Path
+
         try:
-            # 更新配置
-            self.config_manager.set_language(language)
-            
-            # 如果引擎已初始化，尝试更新引擎语言设置
-            if self.ocr_engine._initialized:
-                # 重新初始化引擎以应用新语言设置
-                self.ocr_engine.cleanup()
-                self.ocr_engine.initialize()
-            
+            # 确保目录存在
+            template_dir = Path(__file__).resolve().parent.parent / "templates" / "excel_pivot"
+            template_dir.mkdir(parents=True, exist_ok=True)
+
+            # 验证配置
+            is_valid, error_msg = config.validate()
+            if not is_valid:
+                logger.error(f"[CoreAPI] 透视配置验证失败: {error_msg}")
+                return False
+
+            # 更新时间戳
+            config.updated_at = datetime.now().isoformat()
+
+            # 保存到文件
+            file_path = template_dir / f"{config.id}.json"
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(config.to_dict(), f, ensure_ascii=False, indent=2)
+
+            logger.info(f"[CoreAPI] 透视模板已保存: {config.name} ({config.id})")
             return True
+
         except Exception as e:
-            logger.error(f"更新OCR语言设置失败: {str(e)}")
+            logger.error(f"[CoreAPI] 保存透视模板失败: {e}", exc_info=True)
             return False
 
-    def get_system_info(self) -> Dict[str, Any]:
+    def load_pivot_template(self, template_id: str) -> Optional['PivotConfig']:
         """
-        获取系统信息
-        
-        Returns:
-            系统信息字典
-        """
-        import platform
-        import psutil
-        
-        return {
-            "platform": platform.platform(),
-            "python_version": platform.python_version(),
-            "cpu_count": psutil.cpu_count(),
-            "memory_total": psutil.virtual_memory().total,
-            "memory_available": psutil.virtual_memory().available,
-            "disk_usage": psutil.disk_usage('.').percent,
-            "ocr_engine_available": self.ocr_engine.check_config(),
-        }
-    
-    def cleanup_resources(self):
-        """
-        清理资源
-        """
-        # 清理资源
-        if hasattr(self.ocr_engine, 'cleanup'):
-            self.ocr_engine.cleanup()
-        
-        # 清理结果管理器资源
-        self.result_manager.save_history()  # 保存当前结果
-    
-    def recognize_single_image_async(self, image_path: str, progress_callback=None, is_interrupted=None) -> 'ErrorResult':
-        """
-        异步识别单张图片（适用于工作线程）
-        
+        加载透视模板
+
         Args:
-            image_path: 图片路径
-            progress_callback: 进度回调函数
-            is_interrupted: 中断检查函数
-            
+            template_id: 模板 ID
+
         Returns:
-            ErrorResult 包含成功状态和数据或错误信息
+            PivotConfig 对象，失败返回 None
         """
-        if self.use_api_service:
-            # 使用API服务模式
-            return self.api_adapter.recognize_single_image_async(image_path)
-        else:
-            # 使用直接调用模式
+        import json
+        from pathlib import Path
+        from core.excel_models import PivotConfig
+
+        try:
+            template_dir = Path(__file__).resolve().parent.parent / "templates" / "excel_pivot"
+            file_path = template_dir / f"{template_id}.json"
+
+            if not file_path.exists():
+                logger.warning(f"[CoreAPI] 透视模板不存在: {template_id}")
+                return None
+
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            return PivotConfig.from_dict(data)
+
+        except Exception as e:
+            logger.error(f"[CoreAPI] 加载透视模板失败: {e}", exc_info=True)
+            return None
+
+    def get_all_pivot_templates(self) -> List[Dict]:
+        """
+        获取所有透视模板摘要（供 UI 下拉选择）
+
+        Returns:
+            [{"id": str, "name": str, "description": str, "updated_at": str}]
+        """
+        import json
+        from pathlib import Path
+
+        template_dir = Path(__file__).resolve().parent.parent / "templates" / "excel_pivot"
+        if not template_dir.exists():
+            return []
+
+        results = []
+        for fp in template_dir.glob("*.json"):
             try:
-                # 获取错误处理模块
-                error_modules = self._error_modules
-                ErrorResult = error_modules['ErrorResult']
-                create_file_error = error_modules['create_file_error']
-                create_ocr_engine_error = error_modules['create_ocr_engine_error']
-                
-                # 验证输入参数
-                if not image_path or not os.path.exists(image_path):
-                    error = create_file_error(f"图片文件不存在: {image_path}", {"file_path": image_path})
-                    return ErrorResult.error_result(error)
-                
-                if not self.ocr_engine.check_config():
-                    error = create_ocr_engine_error("OCR引擎未正确配置，请先配置引擎路径和模型路径")
-                    return ErrorResult.error_result(error)
-                
-                # 执行识别（使用 recognize_auto 支持超长图切片，传入 config_manager 读取切片参数）
-                result = self.ocr_engine.recognize_auto(
-                    image_path,
-                    config=self.config_manager,
-                    progress_callback=progress_callback,
-                    is_interrupted=is_interrupted
-                )
-                
-                logger.info(f"单图异步识别完成: {image_path}")
-                return ErrorResult.success_result(result)
-                
+                with open(fp, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                results.append({
+                    "id": data.get("id", fp.stem),
+                    "name": data.get("name", "未命名"),
+                    "description": data.get("description", ""),
+                    "updated_at": data.get("updated_at", ""),
+                })
             except Exception as e:
-                logger.error(f"单图异步识别失败: {str(e)}")
-                error = create_ocr_engine_error(f"单图异步识别失败: {str(e)}", {"file_path": image_path})
-                return ErrorResult.error_result(error)
+                logger.warning(f"[CoreAPI] 读取模板失败 {fp.name}: {e}")
+
+        # 按更新时间倒序
+        results.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+        return results
+
+    def delete_pivot_template(self, template_id: str) -> bool:
+        """
+        删除透视模板
+
+        Args:
+            template_id: 模板 ID
+
+        Returns:
+            是否删除成功
+        """
+        from pathlib import Path
+
+        try:
+            template_dir = Path(__file__).resolve().parent.parent / "templates" / "excel_pivot"
+            file_path = template_dir / f"{template_id}.json"
+
+            if file_path.exists():
+                file_path.unlink()
+                logger.info(f"[CoreAPI] 透视模板已删除: {template_id}")
+                return True
+            else:
+                logger.warning(f"[CoreAPI] 透视模板不存在: {template_id}")
+                return False
+
+        except Exception as e:
+            logger.error(f"[CoreAPI] 删除透视模板失败: {e}", exc_info=True)
+            return False
+
+    # ==================== 重新解析 ====================
+
+    def reparse_results(self,
+                        results: List[Dict],
+                        template_id: str,
+                        on_progress: Optional[Callable] = None,
+                        on_complete: Optional[Callable] = None,
+                        on_error: Optional[Callable] = None,
+                        task_id: Optional[str] = None) -> str:
+        """
+        重新解析识别结果（使用不同的模板，不需要重新识别）
+
+        Args:
+            results: 已有识别结果列表（包含 'text' 字段）
+            template_id: 识别模板ID
+            on_progress: 进度回调
+            on_complete: 完成回调，接收重新解析后的结果列表
+            on_error: 错误回调
+            task_id: 任务ID（可选）
+
+        Returns:
+            任务ID
+        """
+        from core.task_manager import TaskType, TaskCallback
+
+        # 创建回调
+        callback = TaskCallback(
+            on_progress=on_progress,
+            on_complete=on_complete,
+            on_error=on_error
+        )
+
+        # 提交任务
+        params = {
+            "results": results,
+            "template_id": template_id,
+        }
+
+        return self.task_manager.submit_task(
+            task_type=TaskType.OCR_REPARSE,
+            params=params,
+            callback=callback,
+            task_id=task_id
+        )
+
+    # ==================== 资源清理 ====================
+
+    def cleanup_resources(self):
+        """清理所有资源 - 通过 TaskManager 统一调度"""
+        logger.info("[CoreAPI] 提交资源清理任务...")
+        
+        # 提交 OCR 关闭任务（由 TaskManager 统一调度）
+        try:
+            self.submit_ocr_shutdown_task()
+        except Exception as e:
+            logger.warning(f"[CoreAPI] 提交 OCR 关闭任务失败: {e}")
+        
+        logger.info("[CoreAPI] 资源清理任务已提交")
 
 
 # 全局核心API实例

@@ -430,7 +430,7 @@ class OcrEngineSettingCard(ExpandGroupSettingCard):
             self.config.set_long_image_mode(True)
             self.config.set_slice_height(2000)
             self.config.set_slice_overlap(100)
-            self.config.set_scan_subdirs(True)
+            self.config.set_scan_subdirs(False)  # 默认不扫描子目录
             self.config.set_history_storage_limit(100)
             self.config.set_history_display_limit(50)
             
@@ -659,6 +659,21 @@ class SettingsPage(ScrollArea):
         )
         self.ui_language_card.optionChanged.connect(self._on_ui_language_changed)
         self.ui_group.addSettingCard(self.ui_language_card)
+        
+        # 导出时包含原始文本 - SwitchSettingCard
+        self.export_include_original_text_card = SwitchSettingCard(
+            icon=FluentIcon.SAVE,
+            title="导出时包含原始文本",
+            content="Excel 导出时，在最后一列添加原始的 OCR 识别文本",
+            parent=self.ui_group
+        )
+        self.export_include_original_text_card.switchButton.setChecked(
+            self.ui_config.get_export_include_original_text()
+        )
+        self.export_include_original_text_card.switchButton.checkedChanged.connect(
+            self._on_export_include_original_text_changed
+        )
+        self.ui_group.addSettingCard(self.export_include_original_text_card)
 
     def add_about_card(self):
         """添加关于信息"""
@@ -889,3 +904,21 @@ class SettingsPage(ScrollArea):
             position=InfoBarPosition.TOP,
             parent=self
         )
+    def _on_export_include_original_text_changed(self, checked: bool):
+        """导出时包含原始文本 - 开关状态变化"""
+        self.ui_config.set_export_include_original_text(checked)
+        
+        if checked:
+            InfoBar.success(
+                title="设置已保存",
+                content="Excel 导出时将包含原始 OCR 文本",
+                position=InfoBarPosition.TOP,
+                parent=self.window()
+            )
+        else:
+            InfoBar.success(
+                title="设置已保存",
+                content="Excel 导出时将不包含原始 OCR 文本",
+                position=InfoBarPosition.TOP,
+                parent=self.window()
+            )

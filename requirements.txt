@@ -12,7 +12,8 @@ pywebview>=4.0           # Web UI（可选）
 
 # 数据处理
 Pillow>=9.0.0            # 图片处理
-openpyxl>=3.0.0          # Excel 导出
+openpyxl>=3.0.0          # Excel 读写
+pandas>=2.0.0            # 数据清洗 & 透视（必填）
 
 # 工具
 pyperclip>=1.8.0         # 剪贴板操作

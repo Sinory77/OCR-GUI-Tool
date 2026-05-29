@@ -109,6 +109,8 @@ nul
 # 本地配置和缓存目录
 .lingma/
 .workbuddy/
+*.xlsx
+logs/
 
 # Windows
 Thumbs.db

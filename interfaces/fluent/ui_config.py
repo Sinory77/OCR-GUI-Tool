@@ -72,6 +72,8 @@ class UIConfigManager:
             "ui_language": "中文",
             "auto_copy": False,
             "theme": "跟随系统",
+            "last_export_format": "TXT",  # 记住上次导出格式
+            "export_include_original_text": True,  # 导出时是否包含原始文本
         }
 
     def save(self) -> bool:
@@ -190,7 +192,7 @@ class UIConfigManager:
             主题名称
         """
         return self.get("theme", "跟随系统")
-
+    
     def set_theme(self, theme: str) -> bool:
         """设置主题
         
@@ -201,3 +203,41 @@ class UIConfigManager:
             是否保存成功
         """
         return self.set("theme", theme)
+    
+    def get_last_export_format(self) -> str:
+        """获取上次导出格式
+        
+        Returns:
+            导出格式（"TXT", "JSON", "Excel"）
+        """
+        return self.get("last_export_format", "TXT")
+    
+    def set_last_export_format(self, format: str) -> bool:
+        """设置上次导出格式
+        
+        Args:
+            format: 导出格式（"TXT", "JSON", "Excel"）
+            
+        Returns:
+            是否保存成功
+        """
+        return self.set("last_export_format", format.upper())
+    
+    def get_export_include_original_text(self) -> bool:
+        """获取导出时是否包含原始文本
+        
+        Returns:
+            是否包含原始文本
+        """
+        return self.get("export_include_original_text", True)
+    
+    def set_export_include_original_text(self, enabled: bool) -> bool:
+        """设置导出时是否包含原始文本
+        
+        Args:
+            enabled: 是否包含原始文本
+            
+        Returns:
+            是否保存成功
+        """
+        return self.set("export_include_original_text", enabled)

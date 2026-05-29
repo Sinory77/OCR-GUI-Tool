@@ -8,6 +8,10 @@ from PySide6.QtCore import QObject, Signal
 from core.error_handler import OCRError, ErrorType
 from datetime import datetime
 import logging
+from pathlib import Path
+
+# 日志文件路径常量
+_LOG_FILE = Path(__file__).resolve().parent.parent.parent / "logs" / "runtime.log"
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -239,6 +243,7 @@ class ErrorUIDisplay:
             title: 标题
             content: 内容
         """
+        content += f"\n\n详细信息请查看日志文件：\n{_LOG_FILE}"
         msg_box = MessageBox(title, content, parent)
         msg_box.yesButton.setText("确定")
         msg_box.cancelButton.hide()
@@ -285,6 +290,9 @@ class ErrorUIDisplay:
         # 添加错误发生时间
         timestamp_str = error.timestamp.strftime('%Y-%m-%d %H:%M:%S')
         content += f"\n\n发生时间: {timestamp_str}"
+
+        # 添加日志文件路径，引导用户排查
+        content += f"\n\n详细信息请查看日志文件：\n{_LOG_FILE}"
 
         return (False, f"{title}|{content}")
 

@@ -7,9 +7,12 @@ import socket  # 套接字
 import atexit  # 退出处理
 import subprocess  # 进程，管道
 import re  # regex
+import logging
 from json import loads as jsonLoads, dumps as jsonDumps
 from sys import platform as sysPlatform  # popen静默模式
 from base64 import b64encode  # base64 编码
+
+logger = logging.getLogger(__name__)
 
 
 class PPOCR_pipe:  # 调用OCR（管道模式）
@@ -146,34 +149,15 @@ class PPOCR_pipe:  # 调用OCR（管道模式）
             try:
                 self.ret.kill()  # 关闭子进程
             except Exception as e:
-                print(f"[Error] ret.kill() {e}")
+                logger.error(f"[Error] ret.kill() {e}")
         self.ret = None
         atexit.unregister(self.exit)  # 移除退出处理
-        print("###  PPOCR引擎子进程关闭！")
-
-    @staticmethod
-    def printResult(res: dict):
-        """用于调试，格式化打印识别结果。\n
-        `res`: OCR识别结果。"""
-
-        # 识别成功
-        if res["code"] == 100:
-            index = 1
-            for line in res["data"]:
-                print(
-                    f"{index}-置信度：{round(line['score'], 2)}，文本：{line['text']}",
-                    end="\n\n" if line.get("end", "") == "\n" else "\n",
-                )
-                index += 1
-        elif res["code"] == 100:
-            print("图片中未识别出文字。")
-        else:
-            print(f"图片识别失败。错误码：{res['code']}，错误信息：{res['data']}")
-
+        logger.info("PPOCR引擎子进程关闭")
+    
     def __del__(self):
         self.exit()
-
-
+    
+    
 class PPOCR_socket(PPOCR_pipe):
     """调用OCR（套接字模式）"""
 
@@ -207,7 +191,7 @@ class PPOCR_socket(PPOCR_pipe):
                 self.ip = splits[0].split("Socket init completed. ")[1]
                 self.port = int(splits[1])  # 提取端口号
                 self.ret.stdout.close()  # 关闭管道重定向，防止缓冲区填满导致堵塞
-                print(f"套接字服务器初始化成功。{self.ip}:{self.port}")
+                logger.info(f"套接字服务器初始化成功。{self.ip}:{self.port}")
                 return
 
         # 如果为远程路径：直接连接
@@ -217,7 +201,7 @@ class PPOCR_socket(PPOCR_pipe):
             testServer = self.runDict({})
             if testServer["code"] in [902, 903, 904]:
                 raise Exception(f"Socket connection fail.")
-            print(f"套接字服务器连接成功。{self.ip}:{self.port}")
+            logger.info(f"套接字服务器连接成功。{self.ip}:{self.port}")
             return
 
         # 异常
@@ -286,13 +270,13 @@ class PPOCR_socket(PPOCR_pipe):
                 try:
                     self.ret.kill()  # 关闭子进程
                 except Exception as e:
-                    print(f"[Error] ret.kill() {e}")
+                    logger.error(f"[Error] ret.kill() {e}")
             self.ret = None
 
         self.ip = None
         self.port = None
         atexit.unregister(self.exit)  # 移除退出处理
-        print("###  PPOCR引擎子进程关闭！")
+        logger.info("PPOCR引擎子进程关闭")
 
     def __del__(self):
         self.exit()

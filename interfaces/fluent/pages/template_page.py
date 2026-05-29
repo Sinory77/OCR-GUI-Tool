@@ -1115,9 +1115,17 @@ class TemplatePage(ScrollArea):
             return
 
         msg = create_message_box("确认删除", f"确定要删除模板「{template.name}」吗？\n\n此操作不可恢复！", self.window())
-        if msg.exec() == MessageBox.Yes:
+        if msg.exec():
             if self.template_manager.delete_template(template_id):
                 self._load_templates()
+                # ★ 清空选择，防止表格默认选中第一行导致后续误删
+                self.template_table.clearSelection()
+                self.template_table.setCurrentCell(-1, -1)
+                self.btn_edit.setEnabled(False)
+                self.btn_delete.setEnabled(False)
+                self.btn_export.setEnabled(False)
+                self.btn_duplicate.setEnabled(False)
+                self.current_template_label.setText("（未选择模板）")
                 InfoBar.success(
                     title="已删除", 
                     content="模板已删除",
@@ -1136,6 +1144,14 @@ class TemplatePage(ScrollArea):
         """刷新模板列表"""
         self.template_manager.reload_templates()
         self._load_templates()
+        # ★ 刷新后清空选择，防止旧选中状态残留
+        self.template_table.clearSelection()
+        self.template_table.setCurrentCell(-1, -1)
+        self.btn_edit.setEnabled(False)
+        self.btn_delete.setEnabled(False)
+        self.btn_export.setEnabled(False)
+        self.btn_duplicate.setEnabled(False)
+        self.current_template_label.setText("（未选择模板）")
         InfoBar.success(
             title="已刷新", 
             content="模板列表已更新",

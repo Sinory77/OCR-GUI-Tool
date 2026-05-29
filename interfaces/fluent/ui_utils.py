@@ -71,5 +71,5 @@ def copy_to_clipboard(text: str) -> bool:
         clipboard.setText(text)
         return True
     except Exception as e:
-        print(f"复制到剪贴板失败: {e}")
+        logger.info(f"复制到剪贴板失败: {e}")
         return False

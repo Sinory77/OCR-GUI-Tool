@@ -153,6 +153,7 @@ class OCRPage(QWidget):
         self._last_selected_index = -1  # 记录上次选中的索引
         self._current_task_is_batch = False  # 当前识别任务是否为批量（回调时使用）
         self._current_single_result = None  # 单图识别结果（含提取字段，供导出/复制用）
+        self._has_extracted_data = False  # 是否有提取字段数据（控制列显示和导出）
         
         self.initUI()
         self._connect_signals()
@@ -1096,6 +1097,8 @@ class OCRPage(QWidget):
         if isinstance(image_paths, list):
             self.result_text.setVisible(False)
             self.result_table.setVisible(True)
+            self.result_table.setColumnHidden(2, True)  # 默认隐藏提取字段列
+            self._has_extracted_data = False
             self.result_table.setRowCount(len(image_paths))
         
         core_api.submit_ocr_task(
@@ -1325,8 +1328,10 @@ class OCRPage(QWidget):
         self.result_text.setVisible(False)
         self.result_table.setVisible(True)
         
-        # 清空表格
+        # 清空表格，默认隐藏提取字段列
         self.result_table.setRowCount(0)
+        self.result_table.setColumnHidden(2, True)
+        self._has_extracted_data = False
         
         # 填充表格
         for row, result in enumerate(results):
@@ -1343,8 +1348,12 @@ class OCRPage(QWidget):
             else:
                 self._set_cell(row, 1, f"错误: {info['error_msg']}")
             
-            # 提取字段（第2列）— 一劳永逸
-            self._set_cell(row, 2, info['extracted_text'])
+            # 提取字段（第2列）
+            extracted = info.get('extracted_text', '')
+            self._set_cell(row, 2, extracted)
+            if extracted:
+                self.result_table.setColumnHidden(2, False)
+                self._has_extracted_data = True
         
         # 自动调整行高
         for row in range(self.result_table.rowCount()):
@@ -1383,8 +1392,12 @@ class OCRPage(QWidget):
         else:
             self._set_cell(row, 1, f"错误: {info['error_msg']}")
         
-        # 第2列：提取字段（总是更新）
-        self._set_cell(row, 2, info['extracted_text'])
+        # 第2列：提取字段
+        extracted = info.get('extracted_text', '')
+        self._set_cell(row, 2, extracted)
+        if extracted:
+            self.result_table.setColumnHidden(2, False)
+            self._has_extracted_data = True
         
         # 实时调整当前行行高
         self.result_table.resizeRowToContents(row)
@@ -1493,7 +1506,9 @@ class OCRPage(QWidget):
                     row_data[column_headers[col]] = text
                 results.append(row_data)
             
-            # 存储列头，供导出使用
+            # 存储列头，供导出使用（排除无数据的提取字段列）
+            if not getattr(self, '_has_extracted_data', False) and "提取字段" in column_headers:
+                column_headers.remove("提取字段")
             self._export_column_headers = column_headers
         else:
             # 文本框可见：从文本框获取结果，并获取提取字段

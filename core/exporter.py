@@ -527,7 +527,17 @@ class ResultExporter:
                 
                 # 动态确定列头
                 if column_headers:
-                    headers = column_headers
+                    headers = list(column_headers)
+                    # 按 include_original_text 过滤/保留文本列
+                    text_cols = {"text", "识别内容", "原始文本"}
+                    if include_original_text:
+                        # 把文本列移到最后
+                        for tc in list(text_cols):
+                            if tc in headers:
+                                headers.remove(tc)
+                                headers.append(tc)
+                    else:
+                        headers = [h for h in headers if h not in text_cols]
                 else:
                     # 使用辅助方法构建列头
                     headers = self._build_excel_headers(results, include_original_text)

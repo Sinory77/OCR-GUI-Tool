@@ -624,6 +624,21 @@ class SettingsPage(ScrollArea):
         self.text_dedup_card.switchButton.checkedChanged.connect(self._on_text_dedup_changed)
         self.ocr_group.addSettingCard(self.text_dedup_card)
 
+        # 导出时包含原始文本
+        self.export_original_card = SwitchSettingCard(
+            icon=FluentIcon.SAVE,
+            title="导出时包含原始文本",
+            content="Excel 导出时，在最后一列添加原始的 OCR 识别文本",
+            parent=self.ocr_group
+        )
+        self.export_original_card.switchButton.setChecked(
+            self.ui_config.get_export_include_original_text()
+        )
+        self.export_original_card.switchButton.checkedChanged.connect(
+            self._on_export_original_changed
+        )
+        self.ocr_group.addSettingCard(self.export_original_card)
+
     def add_ui_cards(self):
         """添加个性化设置卡片"""
         # 主题设置 - OptionsSettingCard
@@ -659,21 +674,6 @@ class SettingsPage(ScrollArea):
         )
         self.ui_language_card.optionChanged.connect(self._on_ui_language_changed)
         self.ui_group.addSettingCard(self.ui_language_card)
-        
-        # 导出时包含原始文本 - SwitchSettingCard
-        self.export_include_original_text_card = SwitchSettingCard(
-            icon=FluentIcon.SAVE,
-            title="导出时包含原始文本",
-            content="Excel 导出时，在最后一列添加原始的 OCR 识别文本",
-            parent=self.ui_group
-        )
-        self.export_include_original_text_card.switchButton.setChecked(
-            self.ui_config.get_export_include_original_text()
-        )
-        self.export_include_original_text_card.switchButton.checkedChanged.connect(
-            self._on_export_include_original_text_changed
-        )
-        self.ui_group.addSettingCard(self.export_include_original_text_card)
 
     def add_about_card(self):
         """添加关于信息"""
@@ -885,6 +885,17 @@ class SettingsPage(ScrollArea):
             parent=self
         )
 
+    def _on_export_original_changed(self, enabled: bool):
+        """导出时包含原始文本 - 开关变化"""
+        self.ui_config.set_export_include_original_text(enabled)
+        status = "包含" if enabled else "不包含"
+        InfoBar.success(
+            title="设置已保存",
+            content=f"Excel 导出时：{status}原始 OCR 文本",
+            position=InfoBarPosition.TOP,
+            parent=self
+        )
+
     def _on_slice_height_changed(self, value: int):
         """切片高度变化 - 核心层处理"""
         self.config.set_slice_height(value)
@@ -904,21 +915,3 @@ class SettingsPage(ScrollArea):
             position=InfoBarPosition.TOP,
             parent=self
         )
-    def _on_export_include_original_text_changed(self, checked: bool):
-        """导出时包含原始文本 - 开关状态变化"""
-        self.ui_config.set_export_include_original_text(checked)
-        
-        if checked:
-            InfoBar.success(
-                title="设置已保存",
-                content="Excel 导出时将包含原始 OCR 文本",
-                position=InfoBarPosition.TOP,
-                parent=self.window()
-            )
-        else:
-            InfoBar.success(
-                title="设置已保存",
-                content="Excel 导出时将不包含原始 OCR 文本",
-                position=InfoBarPosition.TOP,
-                parent=self.window()
-            )

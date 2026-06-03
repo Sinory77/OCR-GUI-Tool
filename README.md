@@ -1,19 +1,21 @@
 # OCR GUI Tool
 
-基于 PaddleOCR-json 的 Windows OCR 截图识别工具，采用现代化的 Fluent Design 界面。
+基于 PaddleOCR-json 的 Windows OCR 桌面工具，采用 Fluent Design 界面，支持批量识别、模板提取、Excel 数据透视、检疫证查询等功能。
 
 ## 功能特点
 
 - 🖼️ **截图识别** - 全局快捷键截图，即时 OCR 识别
-- 📁 **批量识别** - 支持文件夹批量处理，递归扫描子目录
+- 📁 **批量识别** - 支持文件夹批量处理，识别中实时显示进度
 - 🌐 **多语言支持** - 中文（简体/繁体）、英文、日文、韩文等
-- 📋 **结果处理** - 一键复制、导出 TXT/Excel
+- 📋 **结果导出** - 支持 TXT / JSON / Excel 三种格式
 - 📜 **历史记录** - 本地保存识别历史，可追溯查看
 - 🎨 **现代界面** - Fluent Design 风格，支持亮色/暗色主题
 - 📄 **模板管理** - 自定义解析规则，快速提取结构化信息
-- 🔧 **性能优化** - 识别结果缓存，提高重复识别速度
-- ⚡ **异步处理** - 后台任务管理，不阻塞界面操作
-- 🔌 **API 服务** - 可选的 API 服务端架构，支持远程调用
+- 🔧 **性能优化** - 识别结果缓存、文件去重、内容去重
+- ⚡ **异步处理** - TaskManager 统一调度，不阻塞界面
+- 📊 **Excel 透视** - 数据清洗、透视表、大表虚拟滚动渲染
+- 🔍 **检疫证查询** - 对接四川省动物检疫 API，支持 7 种证书类型
+- 🔌 **EventBus** - 核心层主动推送状态变更，UI 自动响应
 
 ## 界面预览
 
@@ -26,8 +28,18 @@
 |------|------|
 | OCR 引擎 | PaddleOCR-json |
 | GUI 框架 | PySide6 + qfluentwidgets |
-| API 框架 | FastAPI + Uvicorn |
-| 语言 | Python 3.10+ |
+| 数据处理 | pandas + openpyxl |
+| 语言 | Python 3.13+ |
+
+## 架构
+
+四层分层架构：
+
+```
+界面层 (UI Layer)  → CoreAPI (纯接口层)  → TaskManager (调度层)  → 执行器 (核心层)
+```
+
+界面层仅负责显示和交互，核心层完全不操作界面代码。EventBus 实现核心到界面的主动推送。
 
 ## 安装
 
@@ -98,93 +110,55 @@ python main.py
 OCR-GUI-Tool/
 ├── api/                              # API 接口层
 │   ├── __init__.py
-│   ├── PPOCR_api.py                 # PaddleOCR API 封装
-│   ├── core_api.py                  # 核心 API
-│   └── ocr_api.py                   # OCR 接口
-│
-├── api_server/                       # API 服务端（可选）
-│   ├── main.py                      # FastAPI 主应用
-│   ├── adapter.py                   # API 适配器
-│   ├── client.py                    # API 客户端
-│   ├── routes/                      # 路由层
-│   │   ├── ocr_routes.py           # OCR 路由
-│   │   └── task_routes.py         # 任务路由
-│   ├── services/                    # 业务服务层
-│   │   └── ocr_service.py
-│   ├── tasks/                       # 异步任务管理层
-│   │   └── task_manager.py
-│   └── utils/                       # 工具公共层
-│       ├── exceptions.py
-│       └── response.py
+│   ├── PPOCR_api.py                 # PaddleOCR API 封装（不可修改）
+│   └── core_api.py                  # 核心 API — 纯接口，不包含业务逻辑
 │
 ├── core/                            # 核心业务逻辑
-│   ├── __init__.py
 │   ├── config.py                    # 配置管理
 │   ├── ocr_engine.py                # OCR 引擎封装
 │   ├── screenshot.py                # 全局截图功能
-│   ├── result_manager.py            # 结果管理
-│   ├── exporter.py                  # 结果导出
+│   ├── result_manager.py            # 结果管理 + 历史记录
+│   ├── exporter.py                  # 结果导出 (TXT/JSON/Excel)
+│   ├── task_manager.py              # 统一任务调度
 │   ├── template_manager.py          # 模板管理
 │   ├── text_parser.py               # 文本解析
-│   ├── async_worker.py              # 异步任务管理
-│   ├── deduplication.py            # 去重功能
-│   ├── error_handler.py            # 错误处理
-│   └── enhanced_error_handler.py   # 增强错误处理
+│   ├── batch_events.py              # 批量事件定义
+│   ├── batch_session.py             # 批量识别会话
+│   ├── batch_session_worker.py      # 批量会话工作线程
+│   ├── cert_query.py                # 检疫证查询 (API 对接)
+│   ├── excel_models.py              # Excel 数据模型
+│   ├── excel_processor.py           # Excel 清洗/透视
+│   ├── log_context.py               # 日志上下文
+│   ├── deduplication.py             # 去重功能
+│   └── error_handler.py             # 错误处理
 │
 ├── interfaces/                      # 界面层
-│   ├── __init__.py
 │   └── fluent/                      # Fluent Design 界面
-│       ├── __init__.py
-│       ├── main_window.py           # 主窗口
+│       ├── main_window.py           # 主窗口 + 导航
 │       ├── ui_utils.py              # 界面工具函数
 │       ├── ui_config.py             # UI 配置
 │       ├── error_ui.py              # 错误界面
 │       ├── components/              # 组件
 │       │   └── screenshot_window.py # 截图窗口
-│       └── pages/                  # 页面组件
-│           ├── __init__.py
-│           ├── ocr_page.py          # OCR 识别页面
-│           ├── history_page.py      # 历史记录页面
-│           ├── template_page.py     # 模板管理页面
-│           └── settings_page.py     # 设置页面
-│
-├── config/                          # 配置文件目录
-│   ├── config.json                 # 用户配置
-│   └── ui_config.json               # UI 配置
-│
-├── templates/                       # 模板文件
-│   ├── 576b8c32.json               # 通用模板
-│   ├── animal_quarantine.json      # 动物检疫证明模板
-│   ├── baohuodan.json             # 报货单模板
-│   └── jianyi.json                # 检疫证明模板
-│
-├── tests/                           # 测试文件
-│   ├── __init__.py
-│   ├── test_config.py              # 配置测试
-│   ├── test_result_manager.py      # 结果管理测试
-│   ├── test_exporter.py           # 导出测试
-│   ├── test_error_handler.py      # 错误处理测试
-│   ├── test_error_ui.py           # 错误界面测试
-│   ├── test_data_baohuodan.txt   # 测试数据
-│   └── test_data_jianyi.txt       # 测试数据
+│       └── pages/                   # 页面
+│           ├── ocr_page.py          # OCR 识别
+│           ├── history_page.py      # 历史记录
+│           ├── template_page.py     # 模板管理
+│           ├── settings_page.py     # 设置
+│           ├── cert_query_page.py   # 检疫证查询
+│           └── excel_page.py        # Excel 数据透视
 │
 ├── docs/                            # 文档
-│   ├── API_REFERENCE.md            # API 参考
-│   ├── DEVELOPER_GUIDE.md          # 开发者指南
-│   ├── OPTIMIZATION_SUMMARY.md     # 优化总结
-│   ├── PERFORMANCE_MONITORING.md   # 性能监控
-│   └── interrupt_mechanism.md     # 中断机制文档
+│   ├── PROJECT_MEMORY.md            # 项目记忆（架构约定+开发历史）
+│   ├── API_REFERENCE.md
+│   ├── DEVELOPER_GUIDE.md
+│   └── ...
 │
+├── config/                          # 配置文件
+├── templates/                       # 模板文件
+├── tests/                           # 测试
 ├── PaddleOCR-json/                  # OCR 引擎（外部依赖）
-│   ├── PaddleOCR-json.exe
-│   ├── *.dll
-│   └── models/
-│
-├── main.py                           # 主入口
-├── run.py                            # 快速测试入口
-├── requirements.txt                  # Python 依赖
-├── requirements-dev.txt              # 开发依赖
-├── pytest.ini                        # pytest 配置
+├── main.py / run.py                 # 入口
 └── README.md
 ```
 
@@ -198,13 +172,18 @@ OCR-GUI-Tool/
 | `ocr_engine.py` | 封装 PaddleOCR-json 进程管理、通讯协议 |
 | `screenshot.py` | 调用 Windows API 实现全局截图 |
 | `result_manager.py` | 识别结果管理，包括历史记录和缓存 |
-| `exporter.py` | 结果导出功能，支持 TXT 和 Excel 格式 |
+| `exporter.py` | 结果导出功能，支持 TXT/JSON/Excel |
+| `task_manager.py` | 统一任务调度，所有功能通过 TaskManager 执行 |
 | `template_manager.py` | 模板管理，支持自定义解析规则 |
 | `text_parser.py` | 文本解析，根据模板提取结构化信息 |
-| `async_worker.py` | 异步任务管理，提高用户体验 |
-| `deduplication.py` | 识别结果去重 |
+| `batch_events.py` | 批量识别事件定义 |
+| `batch_session.py` | 批量识别会话状态管理 |
+| `batch_session_worker.py` | 批量会话后台工作线程 |
+| `cert_query.py` | 检疫证查询，对接四川省动物检疫 API |
+| `excel_models.py` | Excel 数据清洗/透视数据模型 |
+| `excel_processor.py` | Excel 加载/清洗/透视/导出核心执行器 |
+| `deduplication.py` | 文件去重 + 内容去重（SimHash 精确匹配） |
 | `error_handler.py` | 错误处理 |
-| `enhanced_error_handler.py` | 增强错误处理 |
 
 ### `interfaces/fluent/` - 界面实现
 
@@ -214,23 +193,12 @@ OCR-GUI-Tool/
 | `ui_utils.py` | 界面工具函数，统一管理中文对话框 |
 | `ui_config.py` | UI 配置管理 |
 | `error_ui.py` | 错误界面组件 |
-| `components/screenshot_window.py` | 截图窗口组件 |
-| `pages/ocr_page.py` | OCR 识别页面，包含截图、拖拽、批量识别功能 |
-| `pages/history_page.py` | 历史记录页面，管理识别历史 |
-| `pages/template_page.py` | 模板管理页面，创建和测试解析模板 |
-| `pages/settings_page.py` | 设置页面，配置 OCR 引擎和应用参数 |
-
-### `api_server/` - API 服务端
-
-| 文件/目录 | 说明 |
-|------|------|
-| `main.py` | FastAPI 主应用入口 |
-| `adapter.py` | API 适配器 |
-| `client.py` | API 客户端 |
-| `routes/` | API 路由 |
-| `services/` | 业务服务层 |
-| `tasks/` | 异步任务管理 |
-| `utils/` | 工具函数 |
+| `pages/ocr_page.py` | OCR 识别页面（截图、拖拽、批量） |
+| `pages/history_page.py` | 历史记录页面 |
+| `pages/template_page.py` | 模板管理页面 |
+| `pages/settings_page.py` | 设置页面（OCR 引擎、个性化） |
+| `pages/cert_query_page.py` | 检疫证查询页面 |
+| `pages/excel_page.py` | Excel 数据透视页面 |
 
 ## 配置说明
 
@@ -270,29 +238,36 @@ OCR-GUI-Tool/
 
 ## 更新日志
 
+### v2.3.0 (2026-06-03)
+- 新增检疫证查询功能（7 种证书类型，API 对接 scahi.org.cn）
+- 新增 Excel 数据透视模块（清洗/透视/虚拟滚动渲染）
+- 重构为四层架构：UI → CoreAPI → TaskManager → Executors
+- 新增 TaskManager 统一调度、EventBus 核心推送
+- 删除旧 api_server 模块（架构迁移）
+- 提取字段列智能显隐（无模板时自动隐藏）
+- 导出原始文本开关移至 OCR 设置分组
+
+### v2.2.0 (2026-05-29)
+- 批量识别会话管理（batch_session）
+- OCR 引擎优雅关闭机制（exit 指令 + 5s 超时 + taskkill 后备）
+- StateToolTip 自动淡出修复
+- 历史记录-缓存同步一致性修复
+- 文件列表双击识别修复
+
 ### v2.1.0 (2026-05-08)
 - 项目清理，删除 38 个测试/调试文件
-- 新增 api_server 模块（API 服务端架构）
 - 新增 core/deduplication.py（去重功能）
-- 新增 core/enhanced_error_handler.py（增强错误处理）
-- 新增 interfaces/fluent/ui_config.py（UI 配置）
 - 更新工具栏布局为两行设计
 - 完善中断机制文档
 
 ### v2.0.0 (2026-04-20)
-- 优化项目结构，移除多余 UI 实现
 - 添加模板管理功能，支持自定义解析规则
-- 实现识别结果缓存，提高重复识别速度
-- 优化异步任务管理，提升用户体验
-- 统一界面风格，使用 Fluent Design
-- 添加性能监控和优化
-- 完善文档和测试
+- 实现识别结果缓存
+- 优化异步任务管理
+- 统一 Fluent Design 界面风格
 
 ### v1.0.0 (2026-04-13)
 - 初始版本发布
-- 支持多种界面风格
-- 多语言 OCR 识别
-- 历史记录功能
 
 ## License
 
